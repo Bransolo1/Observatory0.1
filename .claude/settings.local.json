@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pandoc \"C:/Users/Brandon Stennett/Downloads/observatory_final.docx\" -o /tmp/observatory_final.md)",
+      "Bash(python \"C:/Users/Brandon Stennett/AppData/Roaming/Claude/local-agent-mode-sessions/skills-plugin/333b1be7-ef28-42c6-9687-ede902d3609b/d9d6862e-0607-4d40-b1b2-db24ee039bfc/skills/docx/scripts/office/unpack.py\" \"C:/Users/Brandon Stennett/Downloads/observatory_final.docx\" /tmp/observatory_unpacked/)",
+      "Bash(pip install:*)",
+      "Bash(ls /tmp/)",
+      "Bash(cygpath -w /tmp/observatory_unpacked/word/document.xml)",
+      "Bash(docker --version)",
+      "Bash(git --version)"
+    ]
+  }
+}

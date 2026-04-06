@@ -1,0 +1,138 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: observatory-postgres
+    environment:
+      POSTGRES_USER: observatory
+      POSTGRES_PASSWORD: observatory_dev
+      POSTGRES_DB: observatory
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observatory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: observatory-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: observatory-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: observatory
+      MINIO_ROOT_PASSWORD: observatory_dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    container_name: observatory-backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://observatory:observatory_dev@postgres:5432/observatory
+      - REDIS_URL=redis://redis:6379/0
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=observatory
+      - S3_SECRET_KEY=observatory_dev
+      - S3_BUCKET=observatory
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-in-production}
+      - ENVIRONMENT=development
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../../backend:/app
+
+  celery-worker:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    container_name: observatory-celery-worker
+    command: celery -A observatory.core.tasks.app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://observatory:observatory_dev@postgres:5432/observatory
+      - REDIS_URL=redis://redis:6379/0
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=observatory
+      - S3_SECRET_KEY=observatory_dev
+      - S3_BUCKET=observatory
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../../backend:/app
+
+  celery-beat:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    container_name: observatory-celery-beat
+    command: celery -A observatory.core.tasks.app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://observatory:observatory_dev@postgres:5432/observatory
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../../backend:/app
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: ../infra/docker/Dockerfile.frontend
+    container_name: observatory-frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-dev-secret-change-in-production}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ../../frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

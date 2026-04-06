@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "observatory": {
+      "command": "python",
+      "args": ["C:/Users/Brandon Stennett/Obsvartory/backend/mcp_server.py"],
+      "env": {
+        "OBSERVATORY_URL": "http://localhost:8000",
+        "OBSERVATORY_ORG_ID": "PASTE_YOUR_ORG_ID_HERE",
+        "OBSERVATORY_API_KEY": "sk-obs_PASTE_YOUR_SERVICE_KEY_HERE"
+      }
+    }
+  }
+}

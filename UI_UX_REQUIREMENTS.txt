@@ -1,0 +1,257 @@
+# Observatory UI/UX Requirements - Extracted from Specification
+
+## DASHBOARD & MAIN VIEWS
+
+### Primary Dashboard Output
+- Observatory Dashboard: Main interface for users to view priority scores and recommendations
+- Continuously updated priority score for product development
+- Answers two core questions every sprint cycle:
+  1. What is the highest-impact thing we could build or change right now?
+  2. What is the evidence behind that recommendation?
+- Displays data from five input layers
+- Shows decision traceability and evidence sources
+
+## USER WORKFLOWS & INTERACTION PATTERNS
+
+### Head of Product Workflow (Weekly)
+- Input: Logs in weekly
+- Views/Screens:
+  - Feature friction reports
+  - Experiment recommendations (ranked by expected revenue impact)
+  - Competitor feature changes
+- Key Component: "Top 3 Experiments to Run" Section
+  - Ranked by expected revenue impact
+  - Hypothesis statements ready for engineering
+  - Variant descriptions included
+  - Experiment specs with A/B test designs
+  - Expected impact clearly stated
+
+### Head of Marketing Workflow (Weekly)
+- Input: Logs in weekly
+- Views/Screens:
+  - Competitive messaging shifts data
+  - Sentiment trends visualization
+  - Battlecard updates
+
+### Research Lead Workflow (As Needed)
+- Input: Logs in as needed
+- Views/Screens:
+  - Research gap briefs with cost estimates
+  - Research gap briefs with value estimates
+
+### CEO/MD Workflow (Monthly)
+- Input: Receives monthly digest
+- Views/Screens:
+  - Strategic overview section
+  - Biggest competitive shifts
+  - Top insights
+  - Portfolio trends
+
+### Sales Team Workflow (Weekly)
+- Input: Receives weekly battlecards
+- Views/Screens:
+  - Updated competitive positioning
+  - Key differentiators
+  - Feature comparison data
+
+### Engineering Leads Workflow
+- Input: Receives experiment specs
+- Views/Screens:
+  - A/B test designs with hypothesis, variants, expected impact
+
+## DATA VISUALIZATIONS & DISPLAYS
+
+### Core Intelligence Layers
+1. External Market Intelligence Layer
+   - Competitor pricing changes
+   - Competitor features tracking
+   - Industry trends
+   - Forum sentiment signals
+   - Review site sentiment
+   - Social media sentiment
+
+2. Internal Product Telemetry Layer
+   - User drop-off points in key flows
+   - Feature usage patterns
+   - Churn prediction patterns
+   - Friction maps
+   - Clickstream drop-offs visualization
+
+3. Voice of Customer Layer
+   - Support ticket themes
+   - Live chat complaints
+   - App store review sentiment
+   - User requests tracking
+
+4. Historic Knowledge Layer
+   - Past research findings
+   - Knowledge base content
+   - Past surveys data
+   - Queryable historical data interface
+
+5. Targeted Primary Research Layer
+   - Research gaps identified
+   - Research briefs with estimated costs
+   - Commissioned research status
+   - Returned findings integration
+
+## SPECIFIC SCREEN/PAGE REQUIREMENTS
+
+### Friction Identification Report Page
+- Purpose: Surface where users struggle, why, and what to do about it
+- Display Must Show:
+  - Where users leave (flow visualization)
+  - Why users leave (VoC data, app store review themes)
+  - What to do about it (recommended actions)
+  - Revenue impact quantification
+
+### Experiment Recommendation Page
+- Hypothesis statements
+- Variant descriptions
+- Expected impact estimates in revenue terms
+- Ranking by expected revenue impact
+
+### Weekly Competitor Tracking Page
+- Week-over-week change summary
+- New features detected
+- Pricing changes with amounts
+- UX/design changes with descriptions
+- Sentiment drift data
+- Promotional activity changes
+
+### Competitive Deep Dive Page
+- Side-by-side competitor analysis
+- Barriers analysis per competitor
+- Motivators analysis per competitor
+- Interventions recommended
+- Behavioral science framework applied
+- Data sources visible
+
+### Battlecard Page
+- Auto-updated positioning statements
+- Key differentiators
+- Feature comparison matrix
+- Strengths/weaknesses summary
+- Sales-team-ready format
+
+### Monthly CEO Digest Report
+- Strategic overview
+- Biggest competitive shifts
+- Top insights summary
+- Portfolio trends
+
+## ANALYTICAL & EVIDENCE FRAMEWORK DISPLAY
+
+### Perspective Indicators
+1. Academic Research Perspective
+   - Published research citations
+   - Behavioral science references
+   - Published conversion research benchmarks
+
+2. Applied Business Research Perspective
+   - Commercial viability assessments
+   - Cost-effectiveness data
+   - Implementation feasibility
+
+3. UX and Design Research Perspective
+   - Nielsen Norman Group references
+   - Baymard Institute recommendations
+   - Design heuristics applied
+   - Form design optimization recommendations
+
+### Evidence Sourcing Display
+- Source Composition Transparency
+- Reddit vs. all users representation notes
+- App store reviewer skew warnings
+- Social listening caveats
+
+## INTERACTIVE ELEMENTS
+
+### Search/Query Capability
+- Historic knowledge queryable interface
+- Search across past surveys, reports, knowledge base documents
+
+### Filtering & Configuration
+- Configurable cadence for automated tracking (default: weekly)
+- Competitor selection/management
+- Data source weighting
+- Time period selection
+
+### Tagging & Linking System
+- Every recommendation tagged with source evidence
+- Linked evidence throughout interface
+
+### Integration Points Display
+- Connection status to analytics platforms, support platforms, competitor tracking tools
+
+## METRIC TRACKING & LEARNING DISPLAY
+
+### Recommendation Performance Tracking
+- Win/loss rate for recommendation types
+- Average revenue impact by type
+- Historical success rates
+
+### Longitudinal Intelligence Visualization
+- Multi-year competitor trend tracking
+- Strategic pattern identification
+
+### Portfolio-Level Analytics
+- Cross-company performance comparison
+- Portfolio velocity metrics
+- Experiment track record across companies
+
+## FIVE CORE USE CASES - OUTPUT SCREENS
+
+### Use Case 1: Feature Friction Identification
+- Flow visualization showing where users struggle
+- VoC + reviews + tickets aggregated
+- Recommended actions
+- Revenue impact quantification
+
+### Use Case 2: Experiment Recommendation
+- Ranked list by expected revenue impact
+- Hypothesis statements
+- Variant descriptions
+- Ready-to-engineer format
+
+### Use Case 3: Weekly Competitor Tracking
+- Week-over-week change summary
+- New features, pricing changes, UX changes
+- Sentiment drift data
+- Single-summary page for quick review
+
+### Use Case 4: Competitive Deep Dive
+- Side-by-side analysis
+- Barriers, motivators, interventions
+- Data sources visible
+- Behavioral science framework
+
+### Use Case 5: Competitive Battlecard
+- Positioning statements
+- Key differentiators
+- Feature comparison matrix
+- Sales-ready format
+
+## SETTINGS & CONFIGURATION SCREENS
+
+### Data Source Configuration
+- Enable/disable data sources
+- Set update cadence
+- Auth/API key management
+
+### Competitor Management
+- Add/remove competitors
+- Set tracking cadence per competitor
+
+### Alert/Notification Settings
+- Threshold configuration
+- Recipient configuration
+- Frequency preferences
+
+## DESIGN PRINCIPLES
+
+1. Speed & Velocity First - Quick scan-friendly, summary-then-detail, one-click evidence
+2. Evidence Transparency - Sources visible, limitations noted, confidence indicators
+3. Action Orientation - Clear CTAs, ready-to-use recommendations, team-specific formats
+4. Decision Support - Recommendations marked as suggestions, evidence-based, alternative perspectives
+5. Integration-First - Embedded in workflows, seamless data combination, tool-matched output
