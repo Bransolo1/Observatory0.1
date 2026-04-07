@@ -17,23 +17,6 @@ import json
 import httpx
 import anthropic
 
-# ─── Config ─────────────────────────────────────────────────────────────────
-BASE_URL = os.environ.get("OBSERVATORY_URL", "http://localhost:8000")
-ORG_ID = os.environ.get("OBSERVATORY_ORG_ID", "")
-API_KEY = os.environ.get("OBSERVATORY_API_KEY", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-
-if not ORG_ID or not API_KEY:
-    print("Error: Set OBSERVATORY_ORG_ID and OBSERVATORY_API_KEY env vars")
-    sys.exit(1)
-if not ANTHROPIC_KEY:
-    print("Error: Set ANTHROPIC_API_KEY for the agent's own Claude calls")
-    sys.exit(1)
-
-API_V1 = f"{BASE_URL}/api/v1/orgs/{ORG_ID}"
-HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-TIMEOUT = 120.0
-
 # ─── Tool definitions ──────────────────────────────────────────────────────
 TOOLS = [
     # --- Read tools ---
@@ -192,10 +175,39 @@ TOOLS = [
             "required": ["competitor_id"],
         },
     },
+    # --- Meta-tool: specialist delegation (used by CCO chat agent) ---
+    {
+        "name": "consult_specialist",
+        "description": "Consult a specialist agent for expert analysis. The specialist will analyze through their domain lens and may use Observatory tools to gather data. Returns the specialist's analysis and recommendations.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "specialist": {
+                    "type": "string",
+                    "enum": [
+                        "behavioural_scientist", "consumer_researcher", "clinical_psychologist",
+                        "qualitative_specialist", "data_scientist", "clinical_lead",
+                        "ux_researcher", "business_strategist",
+                    ],
+                    "description": "Which specialist to consult",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "The specific question or analysis request for the specialist",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional conversation context to pass to the specialist",
+                    "default": "",
+                },
+            },
+            "required": ["specialist", "question"],
+        },
+    },
 ]
 
 
-# ─── Tool executor ──────────────────────────────────────────────────────────
+# ─── Tool routing ──────────────────────────────────────────────────────────
 TOOL_ROUTES = {
     # GET endpoints
     "observatory_summary": ("GET", "/ai/summary"),
@@ -211,50 +223,51 @@ TOOL_ROUTES = {
 }
 
 
-def execute_tool(name: str, args: dict) -> str:
+def execute_tool(name: str, args: dict, api_v1: str, headers: dict, timeout: float = 120.0) -> str:
+    """Execute an Observatory tool by calling the HTTP API. Parameterized for reuse."""
     try:
         # Simple route-based tools
         if name in TOOL_ROUTES:
             method, path = TOOL_ROUTES[name]
             if method == "GET":
-                r = httpx.get(f"{API_V1}{path}", headers=HEADERS, timeout=TIMEOUT)
+                r = httpx.get(f"{api_v1}{path}", headers=headers, timeout=timeout)
             else:
-                r = httpx.post(f"{API_V1}{path}", headers=HEADERS, json={}, timeout=TIMEOUT)
+                r = httpx.post(f"{api_v1}{path}", headers=headers, json={}, timeout=timeout)
             r.raise_for_status()
             return json.dumps(r.json(), indent=2)
 
         # Tools with path params
         if name == "observatory_ask":
-            r = httpx.post(f"{API_V1}/ai/ask", headers=HEADERS, json={"question": args["question"]}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/ai/ask", headers=headers, json={"question": args["question"]}, timeout=timeout)
         elif name == "observatory_analyze_competitor":
-            r = httpx.post(f"{API_V1}/competitors/{args['competitor_id']}/analyze", headers=HEADERS, json={}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/competitors/{args['competitor_id']}/analyze", headers=headers, json={}, timeout=timeout)
         # Intel gathering tools
         elif name == "observatory_scrape_competitor":
-            r = httpx.post(f"{API_V1}/intel/scrape-competitor", headers=HEADERS, json={"competitor_id": args["competitor_id"]}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/scrape-competitor", headers=headers, json={"competitor_id": args["competitor_id"]}, timeout=timeout)
         elif name == "observatory_crawl_competitor":
-            r = httpx.post(f"{API_V1}/intel/crawl-competitor", headers=HEADERS, json={"competitor_id": args["competitor_id"], "max_pages": args.get("max_pages", 10)}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/crawl-competitor", headers=headers, json={"competitor_id": args["competitor_id"], "max_pages": args.get("max_pages", 10)}, timeout=timeout)
         elif name == "observatory_web_search":
-            r = httpx.post(f"{API_V1}/intel/web-search", headers=HEADERS, json={"query": args["query"]}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/web-search", headers=headers, json={"query": args["query"]}, timeout=timeout)
         elif name == "observatory_competitor_news":
-            r = httpx.post(f"{API_V1}/intel/competitor-news", headers=HEADERS, json={"competitor_id": args["competitor_id"]}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/competitor-news", headers=headers, json={"competitor_id": args["competitor_id"]}, timeout=timeout)
         elif name == "observatory_hackernews_scan":
-            r = httpx.post(f"{API_V1}/intel/hackernews-scan", headers=HEADERS, json={"query": args.get("query", "")}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/hackernews-scan", headers=headers, json={"query": args.get("query", "")}, timeout=timeout)
         elif name == "observatory_reddit_scan":
             body = {}
             if args.get("query"):
                 body["query"] = args["query"]
             if args.get("subreddit"):
                 body["subreddit"] = args["subreddit"]
-            r = httpx.post(f"{API_V1}/intel/reddit-scan", headers=HEADERS, json=body, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/reddit-scan", headers=headers, json=body, timeout=timeout)
         elif name == "observatory_scan_reviews":
             body = {"competitor_id": args["competitor_id"]}
             if args.get("platform"):
                 body["platform"] = args["platform"]
-            r = httpx.post(f"{API_V1}/intel/scan-reviews", headers=HEADERS, json=body, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/scan-reviews", headers=headers, json=body, timeout=timeout)
         elif name == "observatory_academic_search":
-            r = httpx.post(f"{API_V1}/intel/academic-search", headers=HEADERS, json={"query": args["query"]}, timeout=TIMEOUT)
+            r = httpx.post(f"{api_v1}/intel/academic-search", headers=headers, json={"query": args["query"]}, timeout=timeout)
         elif name == "observatory_deep_analysis":
-            r = httpx.post(f"{API_V1}/intel/deep-analysis", headers=HEADERS, json={"competitor_id": args["competitor_id"]}, timeout=180.0)
+            r = httpx.post(f"{api_v1}/intel/deep-analysis", headers=headers, json={"competitor_id": args["competitor_id"]}, timeout=180.0)
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
@@ -266,7 +279,7 @@ def execute_tool(name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-# ─── Agent loop ─────────────────────────────────────────────────────────────
+# ─── System prompt ─────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an autonomous Observatory agent. Observatory is a consumer intelligence platform with two capabilities:
 
 **Intelligence Gathering** (real-time external data):
@@ -296,15 +309,16 @@ The gathering step enriches all subsequent generation with real-world data.
 Be methodical. Report what you did at the end."""
 
 
-def run_agent(task: str):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+# ─── Agent loop ─────────────────────────────────────────────────────────────
+def run_agent(task: str, anthropic_key: str, api_v1: str, headers: dict):
+    client = anthropic.Anthropic(api_key=anthropic_key)
     messages = [{"role": "user", "content": task}]
 
     print(f"\n{'='*60}")
     print(f"Observatory Agent — Task: {task}")
     print(f"{'='*60}\n")
 
-    for iteration in range(25):  # max iterations safety (increased for intel gathering)
+    for iteration in range(25):
         response = client.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=4096,
@@ -313,29 +327,24 @@ def run_agent(task: str):
             messages=messages,
         )
 
-        # Collect text and tool_use blocks
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
 
-        # Print any text blocks
         for block in assistant_content:
             if block.type == "text":
                 print(f"\n{block.text}")
 
-        # If done, break
         if response.stop_reason == "end_turn":
             print(f"\n{'='*60}")
             print(f"Agent completed in {iteration + 1} iterations.")
             print(f"{'='*60}")
             break
 
-        # Execute tool calls
         tool_results = []
         for block in assistant_content:
             if block.type == "tool_use":
                 print(f"\n  -> Calling {block.name}({json.dumps(block.input) if block.input else ''})...")
-                result = execute_tool(block.name, block.input)
-                # Truncate for display
+                result = execute_tool(block.name, block.input, api_v1, headers)
                 display = result[:300] + "..." if len(result) > 300 else result
                 print(f"  <- {display}")
                 tool_results.append({
@@ -351,6 +360,21 @@ def run_agent(task: str):
 
 
 if __name__ == "__main__":
+    BASE_URL = os.environ.get("OBSERVATORY_URL", "http://localhost:8000")
+    ORG_ID = os.environ.get("OBSERVATORY_ORG_ID", "")
+    API_KEY = os.environ.get("OBSERVATORY_API_KEY", "")
+    ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not ORG_ID or not API_KEY:
+        print("Error: Set OBSERVATORY_ORG_ID and OBSERVATORY_API_KEY env vars")
+        sys.exit(1)
+    if not ANTHROPIC_KEY:
+        print("Error: Set ANTHROPIC_API_KEY for the agent's own Claude calls")
+        sys.exit(1)
+
+    api_v1 = f"{BASE_URL}/api/v1/orgs/{ORG_ID}"
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
     task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else (
         "Run a full intelligence cycle: "
         "1) Gather real-time intel — scan HackerNews and Reddit for all competitors, "
@@ -358,4 +382,4 @@ if __name__ == "__main__":
         "2) Generate analysis — friction scenarios, experiment ideas, analyze all competitors (enriched with gathered intel), "
         "synthesize insights, detect research gaps, and produce an executive digest."
     )
-    run_agent(task)
+    run_agent(task, ANTHROPIC_KEY, api_v1, headers)

@@ -10,6 +10,7 @@ import {
   FlaskConical,
   Gauge,
   LayoutDashboard,
+  MessageSquare,
   Newspaper,
   Radar,
   Shield,
@@ -36,7 +37,10 @@ import { OrgSwitcher } from "./org-switcher";
 const navGroups = [
   {
     label: "Command",
-    items: [{ title: "Overview", href: "/overview", icon: Gauge }],
+    items: [
+      { title: "Chat", href: "/chat", icon: MessageSquare },
+      { title: "Overview", href: "/overview", icon: Gauge },
+    ],
   },
   {
     label: "1. Inputs",

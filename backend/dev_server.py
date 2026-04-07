@@ -14,8 +14,9 @@ import httpx
 import bcrypt
 import uvicorn
 from jose import jwt
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 
@@ -141,6 +142,22 @@ def init_db():
             result_json TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS chat_conversations (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL,
+            title TEXT DEFAULT 'New conversation',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            tool_calls_json TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
     # Migrations for existing DBs
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(organizations)").fetchall()}
@@ -232,6 +249,39 @@ def get_org_context(conn, org_id: str) -> dict:
         "competitors": [{"name": r["name"], "website_url": r["website_url"], "description": r["description"]} for r in comps],
         "data_sources": [{"type": r["source_type"], "name": r["name"]} for r in sources],
     }
+
+
+def get_recent_intel(conn, org_id: str, limit: int = 10) -> str:
+    """Fetch recent intelligence feeds and format as a context block for prompts."""
+    rows = conn.execute(
+        "SELECT source, query, result_json, created_at FROM intelligence_feeds WHERE org_id = ? ORDER BY created_at DESC LIMIT ?",
+        (org_id, limit)
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = ["\n\n**Recent Intelligence (gathered from external sources):**"]
+    for r in rows:
+        # Summarize each feed entry concisely
+        source = r["source"]
+        query = r["query"]
+        raw = r["result_json"]
+        # Extract a brief summary from the JSON
+        try:
+            data = json.loads(raw)
+            if source == "hackernews" and "hits" in data:
+                summary = f"{len(data['hits'])} HN results for '{query}'"
+            elif source == "reddit" and "posts" in data:
+                summary = f"{len(data['posts'])} Reddit posts about '{query}'"
+            elif source == "perplexity" and "answer" in data:
+                summary = data["answer"][:200]
+            elif source == "firecrawl" and "markdown" in data:
+                summary = data["markdown"][:200]
+            else:
+                summary = str(data)[:200]
+        except Exception:
+            summary = raw[:200]
+        lines.append(f"- [{source}] {query}: {summary}")
+    return "\n".join(lines)
 
 
 def get_api_key(conn, org_id: str) -> str | None:
@@ -853,9 +903,10 @@ def generate_friction(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
     if not ctx_org["product_areas"]:
         conn.close(); raise HTTPException(400, "Add product areas first in Settings → Product.")
 
-    system = """You are a product analyst at Observatory. You surface likely friction signals — drop-offs, rage clicks, error spikes, and funnel breaks — based on common patterns in similar products.
+    intel_block = get_recent_intel(conn, org_id)
+    system = f"""You are a product analyst at Observatory. You surface likely friction signals — drop-offs, rage clicks, error spikes, and funnel breaks — based on common patterns in similar products.
 
-Be specific, quantified, and grounded. Use realistic-looking metrics that a product team would actually encounter."""
+Be specific, quantified, and grounded. Use realistic-looking metrics that a product team would actually encounter.{intel_block}"""
 
     user_msg = f"""Product context:
 {ctx_org['product_description']}
@@ -905,10 +956,11 @@ def generate_experiments(org_id: str, ctx: tuple[str, str] = Depends(require_org
     ctx_org = get_org_context(conn, org_id)
 
     lens_block = format_lens_block(ctx_org["lens_weights"])
+    intel_block = get_recent_intel(conn, org_id)
     system = f"""You are an experimentation strategist at Observatory. Evaluate every experiment through these weighted expert lenses:
 {lens_block}
 
-Be rigorous. Prefer experiments with clear hypotheses and measurable outcomes."""
+Be rigorous. Prefer experiments with clear hypotheses and measurable outcomes.{intel_block}"""
 
     user_msg = f"""Product:
 {ctx_org['product_description']}
@@ -1027,13 +1079,14 @@ def generate_insights(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
     for a in analyses[:3]:
         existing_intel.append(f"COMPETITOR ANALYSIS ({a['name']}):\n{a['analysis_json'][:500]}")
 
+    intel_block = get_recent_intel(conn, org_id)
     lens_block = format_lens_block(ctx_org["lens_weights"])
     system = f"""You are a senior product strategist at Observatory. You synthesize cross-cutting insights from multiple intelligence streams.
 
 EXPERT LENSES:
 {lens_block}
 
-Be concrete, specific, and surprising. Surface patterns the team wouldn't see by looking at each signal stream in isolation."""
+Be concrete, specific, and surprising. Surface patterns the team wouldn't see by looking at each signal stream in isolation.{intel_block}"""
 
     user_msg = f"""Product: {ctx_org['product_description']}
 Product areas: {', '.join(ctx_org['product_areas']) or 'not specified'}
@@ -1092,13 +1145,14 @@ def generate_research_gaps(org_id: str, ctx: tuple[str, str] = Depends(require_o
             items = cached["payload"].get("items", [])
             intel_summary.append(f"{kind.upper()}: {len(items)} items generated")
 
+    intel_block = get_recent_intel(conn, org_id)
     lens_block = format_lens_block(ctx_org["lens_weights"])
     system = f"""You are a research director at Observatory. You identify knowledge gaps — things the team would need to know to make confident decisions but currently lacks evidence for. You then produce structured research briefs that can be directly commissioned.
 
 EXPERT LENSES:
 {lens_block}
 
-Be specific about methodology, realistic about costs, and honest about expected value."""
+Be specific about methodology, realistic about costs, and honest about expected value.{intel_block}"""
 
     user_msg = f"""Product: {ctx_org['product_description']}
 Product areas: {', '.join(ctx_org['product_areas']) or 'not specified'}
@@ -1167,11 +1221,12 @@ def generate_digest(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
         except Exception:
             pass
 
+    intel_block = get_recent_intel(conn, org_id)
     lens_block = format_lens_block(ctx_org["lens_weights"])
     system = f"""You are the Observatory weekly briefing editor for {ctx_org['org_name']}. Produce a crisp, scannable executive digest.
 
 EXPERT LENSES:
-{lens_block}"""
+{lens_block}{intel_block}"""
 
     user_msg = f"""Product: {ctx_org['product_description']}
 
@@ -1669,9 +1724,311 @@ Generate a comprehensive deep-analysis battlecard as JSON:
     return {"competitor_name": comp["name"], "analysis": analysis, "generated_at": now, "intel_sources": len(intel_sections)}
 
 
+# ─── Chat endpoints ─────────────────────────────────────────────────────────
+class ChatMessageIn(BaseModel):
+    content: str
+
+
+@app.get("/api/v1/orgs/{org_id}/chat/conversations")
+def chat_list_conversations(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    user_id, _ = ctx
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM chat_conversations WHERE org_id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 50",
+        (org_id, user_id)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/v1/orgs/{org_id}/chat/conversations")
+def chat_create_conversation(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    user_id, _ = ctx
+    conv_id = str(uuid.uuid4())
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO chat_conversations (id, org_id, user_id) VALUES (?, ?, ?)",
+        (conv_id, org_id, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"id": conv_id, "title": "New conversation"}
+
+
+@app.get("/api/v1/orgs/{org_id}/chat/conversations/{conv_id}")
+def chat_get_messages(org_id: str, conv_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    conv = conn.execute("SELECT * FROM chat_conversations WHERE id = ? AND org_id = ?", (conv_id, org_id)).fetchone()
+    if not conv:
+        conn.close()
+        raise HTTPException(404, "Conversation not found")
+    msgs = conn.execute(
+        "SELECT id, role, content, tool_calls_json, created_at FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC",
+        (conv_id,)
+    ).fetchall()
+    conn.close()
+    return {"id": conv["id"], "title": conv["title"], "messages": [dict(m) for m in msgs]}
+
+
+@app.delete("/api/v1/orgs/{org_id}/chat/conversations/{conv_id}")
+def chat_delete_conversation(org_id: str, conv_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    conn.execute("DELETE FROM chat_conversations WHERE id = ? AND org_id = ?", (conv_id, org_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/v1/orgs/{org_id}/chat/conversations/{conv_id}/messages")
+def chat_send_message(org_id: str, conv_id: str, body: ChatMessageIn, request: Request, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    conv = conn.execute("SELECT * FROM chat_conversations WHERE id = ? AND org_id = ?", (conv_id, org_id)).fetchone()
+    if not conv:
+        conn.close()
+        raise HTTPException(404, "Conversation not found")
+
+    api_key = get_api_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Anthropic API key configured")
+
+    # Save user message
+    user_msg_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
+        (user_msg_id, conv_id, body.content)
+    )
+    # Auto-title from first message
+    msg_count = conn.execute("SELECT COUNT(*) c FROM chat_messages WHERE conversation_id = ?", (conv_id,)).fetchone()["c"]
+    if msg_count == 1:
+        title = body.content[:50] + ("..." if len(body.content) > 50 else "")
+        conn.execute("UPDATE chat_conversations SET title = ? WHERE id = ?", (title, conv_id))
+    conn.execute("UPDATE chat_conversations SET updated_at = datetime('now') WHERE id = ?", (conv_id,))
+    conn.commit()
+
+    # Load conversation history (last 20 messages)
+    history_rows = conn.execute(
+        "SELECT role, content, tool_calls_json FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC",
+        (conv_id,)
+    ).fetchall()
+
+    # Build org context for system prompt
+    ctx_org = get_org_context(conn, org_id)
+    conn.close()
+
+    # Build Anthropic messages from history
+    messages = []
+    for row in history_rows[-20:]:
+        if row["role"] == "user":
+            messages.append({"role": "user", "content": row["content"]})
+        elif row["role"] == "assistant":
+            content = row["content"]
+            tool_calls = json.loads(row["tool_calls_json"]) if row["tool_calls_json"] else None
+            if tool_calls:
+                # Reconstruct assistant content blocks
+                blocks = []
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                for tc in tool_calls:
+                    blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["input"]})
+                messages.append({"role": "assistant", "content": blocks})
+            else:
+                messages.append({"role": "assistant", "content": content})
+        elif row["role"] == "tool":
+            tool_data = json.loads(row["tool_calls_json"]) if row["tool_calls_json"] else {}
+            messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_data.get("tool_use_id", ""), "content": row["content"]}]})
+
+    # Build CCO system prompt
+    from agent_runner import TOOLS as AGENT_TOOLS, execute_tool as agent_execute_tool
+    from specialists import SPECIALISTS, build_specialist_prompt, get_specialist_tools
+
+    lens_block = format_lens_block(ctx_org["lens_weights"])
+    system = f"""You are the Chief Consumer Officer (CCO) for {ctx_org['org_name']}, powered by Observatory — a consumer intelligence platform.
+
+You lead a team of specialist analysts. Your role is to:
+1. Understand the user's question and determine which specialist perspective(s) apply
+2. Consult relevant specialists using the consult_specialist tool
+3. Synthesize their analyses into unified, actionable recommendations
+4. Highlight where specialists agree, disagree, or see different priorities
+5. Make a clear recommendation with your rationale
+
+YOUR SPECIALIST TEAM:
+- **Behavioural Scientist** — biases, nudges, habit loops, persuasion frameworks (Cialdini, Kahneman, BJ Fogg)
+- **Consumer Researcher** — mixed methods, segmentation, journey mapping, voice of customer
+- **Clinical Psychologist** — evidence-based practice, diagnostic frameworks, ethical design, user wellbeing
+- **Qualitative Specialist** — thematic analysis, ethnography, diary studies, lived experience
+- **Data Scientist** — causal inference, A/B testing, Bayesian methods, statistical rigour
+- **Clinical Lead** — systematic review, GRADE framework, research governance, methodology quality
+- **UX Researcher** — Nielsen heuristics, Baymard benchmarks, accessibility, task analysis
+- **Business Strategist** — competitive strategy, Porter's forces, pricing, market positioning, unit economics
+
+DELEGATION RULES:
+- For analytical questions: ALWAYS consult 2-3 relevant specialists before responding
+- For simple lookups (list competitors, check summary): use Observatory tools directly
+- For comprehensive requests ("full analysis", "what should we do about X"): consult 3+ specialists
+- Weight specialist selection toward the org's configured lens priorities:
+{lens_block}
+- Higher-weighted lenses = prioritise those specialists
+
+You also have direct access to all Observatory tools for data retrieval. But for any question requiring interpretation, analysis, or recommendation, delegate to specialists first, then synthesize.
+
+PRODUCT CONTEXT:
+- Organisation: {ctx_org['org_name']}
+- Product: {ctx_org['product_description']}
+- Product Areas: {', '.join(ctx_org['product_areas']) or 'None configured'}
+- Competitors: {', '.join(c['name'] for c in ctx_org['competitors']) or 'None configured'}
+
+Respond conversationally using markdown. After consulting specialists, synthesize their findings — highlight agreements, tensions, and your recommended path forward."""
+
+    # Get the user's auth token for internal API calls
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.replace("Bearer ", "") if auth_header else ""
+    tool_api_v1 = f"http://localhost:8000/api/v1/orgs/{org_id}"
+    tool_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def run_specialist(specialist_name, question, context_text):
+        """Run a nested specialist agent loop. Returns (response_text, events_list)."""
+        spec_prompt = build_specialist_prompt(specialist_name, ctx_org)
+        spec_tools = get_specialist_tools(specialist_name, AGENT_TOOLS)
+        spec_client = anthropic.Anthropic(api_key=api_key)
+        spec_messages = [{"role": "user", "content": f"{question}\n\nContext: {context_text}" if context_text else question}]
+        events = []
+        spec_text = ""
+
+        for _ in range(10):  # max 10 iterations for specialists
+            try:
+                spec_response = spec_client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=3000,
+                    system=spec_prompt,
+                    tools=spec_tools,
+                    messages=spec_messages,
+                )
+            except Exception as e:
+                return f"Error consulting specialist: {e}", events
+
+            spec_content = spec_response.content
+            spec_messages.append({"role": "assistant", "content": spec_content})
+
+            for block in spec_content:
+                if block.type == "text":
+                    spec_text += block.text
+
+            if spec_response.stop_reason == "end_turn":
+                break
+
+            # Execute specialist tool calls
+            tool_results = []
+            for block in spec_content:
+                if block.type == "tool_use":
+                    events.append({"type": "specialist_tool", "specialist": specialist_name, "tool": block.name, "status": "running"})
+                    try:
+                        result = agent_execute_tool(block.name, block.input, tool_api_v1, tool_headers)
+                    except Exception as e:
+                        result = json.dumps({"error": str(e)})
+                    events.append({"type": "specialist_tool", "specialist": specialist_name, "tool": block.name, "status": "done"})
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+
+            if tool_results:
+                spec_messages.append({"role": "user", "content": tool_results})
+
+        return spec_text, events
+
+    def event_stream():
+        client = anthropic.Anthropic(api_key=api_key)
+        full_text = ""
+        tool_calls_list = []
+
+        for iteration in range(25):
+            try:
+                with client.messages.stream(
+                    model=CLAUDE_MODEL,
+                    max_tokens=4096,
+                    system=system,
+                    tools=AGENT_TOOLS,
+                    messages=messages,
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content_block_start":
+                            if hasattr(event.content_block, "type") and event.content_block.type == "tool_use":
+                                yield f"data: {json.dumps({'type': 'tool_start', 'name': event.content_block.name})}\n\n"
+                        elif event.type == "content_block_delta":
+                            if hasattr(event.delta, "type") and event.delta.type == "text_delta":
+                                full_text += event.delta.text
+                                yield f"data: {json.dumps({'type': 'text', 'content': event.delta.text})}\n\n"
+
+                    response = stream.get_final_message()
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                break
+
+            assistant_content = response.content
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            if response.stop_reason == "end_turn":
+                break
+
+            # Execute tool calls
+            tool_results = []
+            for block in assistant_content:
+                if block.type == "tool_use":
+                    tool_calls_list.append({"id": block.id, "name": block.name, "input": block.input})
+
+                    # Special handling for consult_specialist
+                    if block.name == "consult_specialist":
+                        specialist_name = block.input.get("specialist", "")
+                        spec_question = block.input.get("question", "")
+                        spec_context = block.input.get("context", "")
+                        display_name = SPECIALISTS.get(specialist_name, {}).get("display_name", specialist_name)
+
+                        yield f"data: {json.dumps({'type': 'specialist_start', 'specialist': specialist_name, 'display_name': display_name, 'question': spec_question})}\n\n"
+
+                        spec_result, spec_events = run_specialist(specialist_name, spec_question, spec_context)
+
+                        # Emit specialist's tool activity
+                        for se in spec_events:
+                            yield f"data: {json.dumps(se)}\n\n"
+
+                        preview = spec_result[:300] + "..." if len(spec_result) > 300 else spec_result
+                        yield f"data: {json.dumps({'type': 'specialist_done', 'specialist': specialist_name, 'display_name': display_name, 'preview': preview})}\n\n"
+
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": spec_result})
+                    else:
+                        # Regular Observatory tool
+                        try:
+                            result = agent_execute_tool(block.name, block.input, tool_api_v1, tool_headers)
+                        except Exception as e:
+                            result = json.dumps({"error": str(e)})
+                        preview = result[:200] + "..." if len(result) > 200 else result
+                        yield f"data: {json.dumps({'type': 'tool_result', 'name': block.name, 'preview': preview})}\n\n"
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+
+        # Save assistant message to DB
+        save_conn = get_db()
+        assistant_msg_id = str(uuid.uuid4())
+        save_conn.execute(
+            "INSERT INTO chat_messages (id, conversation_id, role, content, tool_calls_json) VALUES (?, ?, 'assistant', ?, ?)",
+            (assistant_msg_id, conv_id, full_text, json.dumps(tool_calls_list) if tool_calls_list else None)
+        )
+        save_conn.commit()
+        save_conn.close()
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "0.3.0-claude", "mode": "sqlite", "claude": ANTHROPIC_AVAILABLE}
+    return {"status": "healthy", "version": "0.4.0-chat", "mode": "sqlite", "claude": ANTHROPIC_AVAILABLE}
 
 
 if __name__ == "__main__":

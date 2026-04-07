@@ -614,4 +614,44 @@ export const apiKeys = {
     request<{ ok: boolean }>(`/orgs/${orgId}/api-keys/perplexity`, { method: "POST", body: JSON.stringify(data) }),
 };
 
-export default { auth, friction, insights, scores, competitors, knowledge, battlecards, digests, research, onboarding, productAreas, dataSources, ai, org, serviceKeys, intel, apiKeys };
+// ─── Chat ──────────────────────────────────────────────────────────────────
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: string;
+  content: string;
+  tool_calls_json?: string | null;
+  created_at: string;
+}
+
+export const chat = {
+  conversations: (orgId: string) =>
+    request<Conversation[]>(`/orgs/${orgId}/chat/conversations`),
+  create: (orgId: string) =>
+    request<{ id: string; title: string }>(`/orgs/${orgId}/chat/conversations`, { method: "POST" }),
+  messages: (orgId: string, convId: string) =>
+    request<{ id: string; title: string; messages: ChatMessage[] }>(`/orgs/${orgId}/chat/conversations/${convId}`),
+  delete: (orgId: string, convId: string) =>
+    request<{ ok: boolean }>(`/orgs/${orgId}/chat/conversations/${convId}`, { method: "DELETE" }),
+  sendMessage: async (orgId: string, convId: string, content: string): Promise<Response> => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("observatory_token") : null;
+    const res = await fetch(`${API_V1}/orgs/${orgId}/chat/conversations/${convId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ content }),
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return res;
+  },
+};
+
+export default { auth, friction, insights, scores, competitors, knowledge, battlecards, digests, research, onboarding, productAreas, dataSources, ai, org, serviceKeys, intel, apiKeys, chat };
