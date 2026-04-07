@@ -27,7 +27,7 @@ API_V1 = f"{BASE_URL}/api/v1/orgs/{ORG_ID}"
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 TIMEOUT = 120.0  # Claude generation can take a while
 
-mcp = FastMCP("Observatory", instructions="Consumer intelligence platform — analyse competitors, surface friction, recommend experiments, and more.")
+mcp = FastMCP("Observatory", instructions="Consumer intelligence platform — analyse competitors, surface friction, recommend experiments, gather real-time market intelligence, and more.")
 
 
 def _get(path: str) -> str:
@@ -45,7 +45,7 @@ def _post(path: str, body: dict | None = None) -> str:
 # ─── Read tools ─────────────────────────────────────────────────────────────
 @mcp.tool()
 def observatory_summary() -> str:
-    """Get a summary of all Observatory intelligence — counts of analyses, friction scenarios, experiment ideas, and whether the Anthropic API key is configured."""
+    """Get a summary of all Observatory intelligence — counts of analyses, friction scenarios, experiment ideas, and whether API keys are configured."""
     return _get("/ai/summary")
 
 
@@ -59,6 +59,12 @@ def observatory_list_competitors() -> str:
 def observatory_list_product_areas() -> str:
     """List all configured product areas."""
     return _get("/product-areas")
+
+
+@mcp.tool()
+def observatory_intelligence_feeds() -> str:
+    """Get all gathered intelligence feeds — scraped websites, web searches, social mentions, academic papers. Returns the 50 most recent entries."""
+    return _get("/intel/feeds")
 
 
 # ─── Generation tools ──────────────────────────────────────────────────────
@@ -102,6 +108,69 @@ def observatory_research_gaps() -> str:
 def observatory_digest() -> str:
     """Generate an executive intelligence digest summarising all available intelligence — competitive moves, friction, experiments, and research priorities."""
     return _post("/ai/digest")
+
+
+# ─── Intelligence gathering tools ──────────────────────────────────────────
+@mcp.tool()
+def observatory_scrape_competitor(competitor_id: str) -> str:
+    """Scrape a competitor's website using Firecrawl to extract pricing, features, positioning. Requires Firecrawl API key in Settings."""
+    return _post("/intel/scrape-competitor", {"competitor_id": competitor_id})
+
+
+@mcp.tool()
+def observatory_crawl_competitor(competitor_id: str, max_pages: int = 10) -> str:
+    """Deep-crawl a competitor's website (multiple pages) using Firecrawl. Returns structured content from up to max_pages pages."""
+    return _post("/intel/crawl-competitor", {"competitor_id": competitor_id, "max_pages": max_pages})
+
+
+@mcp.tool()
+def observatory_web_search(query: str) -> str:
+    """Search the live web for market intelligence using Perplexity. Returns answer with citations. Requires Perplexity API key."""
+    return _post("/intel/web-search", {"query": query})
+
+
+@mcp.tool()
+def observatory_competitor_news(competitor_id: str) -> str:
+    """Get the latest news and updates about a specific competitor using Perplexity web search."""
+    return _post("/intel/competitor-news", {"competitor_id": competitor_id})
+
+
+@mcp.tool()
+def observatory_hackernews_scan(query: str = "") -> str:
+    """Scan HackerNews for mentions of competitors or topics. Free — no API key required. Defaults to searching for all competitor names."""
+    return _post("/intel/hackernews-scan", {"query": query} if query else {})
+
+
+@mcp.tool()
+def observatory_reddit_scan(query: str = "", subreddit: str = "") -> str:
+    """Scan Reddit for mentions and discussions. Free — no API key required. Optionally filter by subreddit."""
+    body = {}
+    if query:
+        body["query"] = query
+    if subreddit:
+        body["subreddit"] = subreddit
+    return _post("/intel/reddit-scan", body)
+
+
+@mcp.tool()
+def observatory_scan_reviews(competitor_id: str, platform: str = "") -> str:
+    """Scan for competitor reviews on G2, Trustpilot, App Store, etc. Uses Perplexity for intelligent review aggregation."""
+    body = {"competitor_id": competitor_id}
+    if platform:
+        body["platform"] = platform
+    return _post("/intel/scan-reviews", body)
+
+
+@mcp.tool()
+def observatory_academic_search(query: str) -> str:
+    """Search for academic papers and research relevant to your product domain. Uses Google Scholar via SerpAPI or Perplexity fallback."""
+    return _post("/intel/academic-search", {"query": query})
+
+
+@mcp.tool()
+def observatory_deep_analysis(competitor_id: str) -> str:
+    """Run a deep analysis on a competitor — scrapes their website, searches for news, scans social media, then synthesizes everything through Claude's 7-lens framework. This is the most comprehensive analysis available."""
+    return _post("/intel/deep-analysis", {"competitor_id": competitor_id})
 
 
 if __name__ == "__main__":

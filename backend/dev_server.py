@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
+import httpx
 import bcrypt
 import uvicorn
 from jose import jwt
@@ -23,6 +24,8 @@ try:
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
+
+import httpx
 
 DB_PATH = "observatory_dev.db"
 JWT_SECRET = "dev-secret-change-in-production"
@@ -130,11 +133,23 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now')),
             last_used_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS intelligence_feeds (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            query TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
     # Migrations for existing DBs
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(organizations)").fetchall()}
     if "anthropic_api_key" not in cols:
         conn.execute("ALTER TABLE organizations ADD COLUMN anthropic_api_key TEXT")
+    if "firecrawl_api_key" not in cols:
+        conn.execute("ALTER TABLE organizations ADD COLUMN firecrawl_api_key TEXT")
+    if "perplexity_api_key" not in cols:
+        conn.execute("ALTER TABLE organizations ADD COLUMN perplexity_api_key TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(competitors)").fetchall()}
     if "analysis_json" not in cols:
         conn.execute("ALTER TABLE competitors ADD COLUMN analysis_json TEXT")
@@ -222,7 +237,84 @@ def get_org_context(conn, org_id: str) -> dict:
 def get_api_key(conn, org_id: str) -> str | None:
     row = conn.execute("SELECT anthropic_api_key FROM organizations WHERE id = ?", (org_id,)).fetchone()
     key = row["anthropic_api_key"] if row else None
-    return key or os.environ.get("ANTHROPIC_API_KEY")
+    return key or os.environ.get("ANTHROPIC_API_KEY") or None
+
+
+def get_firecrawl_key(conn, org_id: str) -> str | None:
+    row = conn.execute("SELECT firecrawl_api_key FROM organizations WHERE id = ?", (org_id,)).fetchone()
+    key = row["firecrawl_api_key"] if row else None
+    return key or os.environ.get("FIRECRAWL_API_KEY") or None
+
+
+def get_perplexity_key(conn, org_id: str) -> str | None:
+    row = conn.execute("SELECT perplexity_api_key FROM organizations WHERE id = ?", (org_id,)).fetchone()
+    key = row["perplexity_api_key"] if row else None
+    return key or os.environ.get("PERPLEXITY_API_KEY") or None
+
+
+def firecrawl_scrape(api_key: str, url: str) -> dict:
+    """Scrape a single URL with Firecrawl."""
+    r = httpx.post("https://api.firecrawl.dev/v1/scrape",
+                   headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                   json={"url": url, "formats": ["markdown"]},
+                   timeout=60.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def firecrawl_crawl(api_key: str, url: str, max_pages: int = 10) -> dict:
+    """Crawl multiple pages with Firecrawl."""
+    r = httpx.post("https://api.firecrawl.dev/v1/crawl",
+                   headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                   json={"url": url, "limit": max_pages, "scrapeOptions": {"formats": ["markdown"]}},
+                   timeout=120.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def perplexity_search(api_key: str, query: str) -> dict:
+    """Search the web with Perplexity Sonar."""
+    r = httpx.post("https://api.perplexity.ai/chat/completions",
+                   headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                   json={
+                       "model": "sonar",
+                       "messages": [{"role": "user", "content": query}],
+                   },
+                   timeout=30.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def hackernews_search(query: str, hits: int = 20) -> list[dict]:
+    """Search HN via Algolia (free, no auth)."""
+    r = httpx.get("https://hn.algolia.com/api/v1/search",
+                  params={"query": query, "tags": "story", "hitsPerPage": hits},
+                  timeout=15.0)
+    r.raise_for_status()
+    return r.json().get("hits", [])
+
+
+def reddit_search(query: str, subreddit: str | None = None, limit: int = 25) -> list[dict]:
+    """Search Reddit (free, no auth needed with User-Agent)."""
+    url = f"https://old.reddit.com/r/{subreddit}/search.json" if subreddit else "https://old.reddit.com/search.json"
+    r = httpx.get(url,
+                  params={"q": query, "sort": "new", "limit": limit, "restrict_sr": "on" if subreddit else ""},
+                  headers={"User-Agent": "Observatory/1.0 (Consumer Intelligence Platform)"},
+                  timeout=15.0)
+    r.raise_for_status()
+    data = r.json().get("data", {}).get("children", [])
+    return [c["data"] for c in data]
+
+
+def save_intel_feed(conn, org_id: str, source: str, query: str, result: dict) -> str:
+    """Save an intelligence feed entry and return its ID."""
+    feed_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO intelligence_feeds (id, org_id, source, query, result_json, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
+        (feed_id, org_id, source, query, json.dumps(result))
+    )
+    conn.commit()
+    return feed_id
 
 
 def claude_client(api_key: str):
@@ -316,6 +408,51 @@ class ApiKeyIn(BaseModel):
 
 class AskIn(BaseModel):
     question: str
+
+
+class IntelScrapeIn(BaseModel):
+    competitor_id: str | None = None
+    url: str | None = None
+
+
+class IntelCrawlIn(BaseModel):
+    competitor_id: str | None = None
+    url: str | None = None
+    max_pages: int | None = 10
+
+
+class IntelWebSearchIn(BaseModel):
+    query: str
+
+
+class IntelCompetitorNewsIn(BaseModel):
+    competitor_id: str
+
+
+class IntelHNScanIn(BaseModel):
+    query: str | None = None
+
+
+class IntelRedditScanIn(BaseModel):
+    query: str | None = None
+    subreddit: str | None = None
+
+
+class IntelReviewScanIn(BaseModel):
+    competitor_id: str
+    platform: str | None = None
+
+
+class IntelAcademicIn(BaseModel):
+    query: str
+
+
+class IntelDeepAnalysisIn(BaseModel):
+    competitor_id: str
+
+
+class IntelApiKeyIn(BaseModel):
+    api_key: str
 
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
@@ -837,15 +974,21 @@ def ai_summary(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
     analyzed = conn.execute("SELECT COUNT(*) c FROM competitors WHERE org_id = ? AND analysis_json IS NOT NULL", (org_id,)).fetchone()["c"]
     total_comps = conn.execute("SELECT COUNT(*) c FROM competitors WHERE org_id = ?", (org_id,)).fetchone()["c"]
     api_key = get_api_key(conn, org_id)
+    firecrawl_key = get_firecrawl_key(conn, org_id)
+    perplexity_key = get_perplexity_key(conn, org_id)
+    intel_count = conn.execute("SELECT COUNT(*) c FROM intelligence_feeds WHERE org_id = ?", (org_id,)).fetchone()["c"]
     conn.close()
     return {
         "has_api_key": api_key is not None,
+        "has_firecrawl_key": firecrawl_key is not None,
+        "has_perplexity_key": perplexity_key is not None,
         "friction_count": len((friction or {}).get("payload", {}).get("items", [])) if friction else 0,
         "friction_at": friction["generated_at"] if friction else None,
         "experiments_count": len((exp or {}).get("payload", {}).get("items", [])) if exp else 0,
         "experiments_at": exp["generated_at"] if exp else None,
         "competitors_analyzed": analyzed,
         "competitors_total": total_comps,
+        "intel_feeds_count": intel_count,
     }
 
 
@@ -1147,6 +1290,383 @@ def research_briefs(_=Depends(get_user)):
 @app.post("/api/v1/research/detect-gaps")
 def research_detect_gaps(_=Depends(get_user)):
     return {"gaps": [], "count": 0}
+
+
+# ─── Intelligence Gathering ─────────────────────────────────────────────────
+
+def _resolve_competitor_url(conn, org_id: str, competitor_id: str | None, url: str | None) -> tuple:
+    """Resolve a competitor_id or url into (competitor_row_or_None, url)."""
+    if competitor_id:
+        comp = conn.execute("SELECT * FROM competitors WHERE id = ? AND org_id = ?", (competitor_id, org_id)).fetchone()
+        if not comp:
+            raise HTTPException(404, "Competitor not found")
+        return comp, url or comp["website_url"]
+    if url:
+        return None, url
+    raise HTTPException(400, "Provide competitor_id or url")
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/scrape-competitor")
+def intel_scrape_competitor(org_id: str, body: IntelScrapeIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    api_key = get_firecrawl_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Firecrawl API key configured. Add one in Settings or set FIRECRAWL_API_KEY env var.")
+    comp, target_url = _resolve_competitor_url(conn, org_id, body.competitor_id, body.url)
+    if not target_url:
+        conn.close()
+        raise HTTPException(400, "No URL available for this competitor")
+    try:
+        result = firecrawl_scrape(api_key, target_url)
+    except httpx.HTTPStatusError as e:
+        conn.close()
+        raise HTTPException(e.response.status_code, f"Firecrawl error: {e.response.text[:500]}")
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Firecrawl request failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "firecrawl", target_url, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "firecrawl", "url": target_url, "result": result}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/crawl-competitor")
+def intel_crawl_competitor(org_id: str, body: IntelCrawlIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    api_key = get_firecrawl_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Firecrawl API key configured.")
+    comp, target_url = _resolve_competitor_url(conn, org_id, body.competitor_id, body.url)
+    if not target_url:
+        conn.close()
+        raise HTTPException(400, "No URL available for this competitor")
+    try:
+        result = firecrawl_crawl(api_key, target_url, body.max_pages or 10)
+    except httpx.HTTPStatusError as e:
+        conn.close()
+        raise HTTPException(e.response.status_code, f"Firecrawl error: {e.response.text[:500]}")
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Firecrawl crawl failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "firecrawl", f"crawl:{target_url}", result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "firecrawl", "url": target_url, "result": result}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/web-search")
+def intel_web_search(org_id: str, body: IntelWebSearchIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    api_key = get_perplexity_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Perplexity API key configured. Add one in Settings or set PERPLEXITY_API_KEY env var.")
+    try:
+        result = perplexity_search(api_key, body.query)
+    except httpx.HTTPStatusError as e:
+        conn.close()
+        raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Perplexity request failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "perplexity", body.query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "perplexity", "query": body.query, "result": result}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/competitor-news")
+def intel_competitor_news(org_id: str, body: IntelCompetitorNewsIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    api_key = get_perplexity_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Perplexity API key configured.")
+    comp = conn.execute("SELECT * FROM competitors WHERE id = ? AND org_id = ?", (body.competitor_id, org_id)).fetchone()
+    if not comp:
+        conn.close()
+        raise HTTPException(404, "Competitor not found")
+    now = datetime.now(timezone.utc)
+    query = f"latest news about {comp['name']} {now.strftime('%B')} {now.year}"
+    try:
+        result = perplexity_search(api_key, query)
+    except httpx.HTTPStatusError as e:
+        conn.close()
+        raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Perplexity request failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "perplexity", query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "perplexity", "competitor": comp["name"], "query": query, "result": result}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/hackernews-scan")
+def intel_hackernews_scan(org_id: str, body: IntelHNScanIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    query = body.query
+    if not query:
+        comps = conn.execute("SELECT name FROM competitors WHERE org_id = ?", (org_id,)).fetchall()
+        query = " OR ".join(c["name"] for c in comps) if comps else ""
+    if not query:
+        conn.close()
+        raise HTTPException(400, "No query provided and no competitors configured")
+    try:
+        hits = hackernews_search(query)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"HackerNews search failed: {str(e)}")
+    result = {"query": query, "hits": hits}
+    feed_id = save_intel_feed(conn, org_id, "hackernews", query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "hackernews", "query": query, "hits": hits}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/reddit-scan")
+def intel_reddit_scan(org_id: str, body: IntelRedditScanIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    query = body.query
+    if not query:
+        comps = conn.execute("SELECT name FROM competitors WHERE org_id = ?", (org_id,)).fetchall()
+        query = " OR ".join(c["name"] for c in comps) if comps else ""
+    if not query:
+        conn.close()
+        raise HTTPException(400, "No query provided and no competitors configured")
+    try:
+        posts = reddit_search(query, body.subreddit)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Reddit search failed: {str(e)}")
+    result = {"query": query, "subreddit": body.subreddit, "posts": posts}
+    feed_id = save_intel_feed(conn, org_id, "reddit", query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "reddit", "query": query, "posts": posts}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/scan-reviews")
+def intel_scan_reviews(org_id: str, body: IntelReviewScanIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    api_key = get_perplexity_key(conn, org_id)
+    if not api_key:
+        conn.close()
+        raise HTTPException(400, "No Perplexity API key configured.")
+    comp = conn.execute("SELECT * FROM competitors WHERE id = ? AND org_id = ?", (body.competitor_id, org_id)).fetchone()
+    if not comp:
+        conn.close()
+        raise HTTPException(404, "Competitor not found")
+    platform = body.platform or "G2 Capterra Trustpilot"
+    query = f"{comp['name']} reviews {platform} 2024 2025 — summarize key themes, pros, cons, and ratings"
+    try:
+        result = perplexity_search(api_key, query)
+    except httpx.HTTPStatusError as e:
+        conn.close()
+        raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Perplexity request failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "g2_reviews", query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "g2_reviews", "competitor": comp["name"], "query": query, "result": result}
+
+
+@app.post("/api/v1/orgs/{org_id}/intel/academic-search")
+def intel_academic_search(org_id: str, body: IntelAcademicIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    serpapi_key = os.environ.get("SERPAPI_KEY")
+    if serpapi_key:
+        try:
+            r = httpx.get("https://serpapi.com/search",
+                          params={"engine": "google_scholar", "q": body.query, "api_key": serpapi_key},
+                          timeout=15.0)
+            r.raise_for_status()
+            result = r.json()
+        except Exception as e:
+            conn.close()
+            raise HTTPException(502, f"SerpAPI request failed: {str(e)}")
+        feed_id = save_intel_feed(conn, org_id, "google_scholar", body.query, result)
+        conn.close()
+        return {"feed_id": feed_id, "source": "google_scholar", "query": body.query, "result": result}
+    # Fallback to Perplexity
+    pplx_key = get_perplexity_key(conn, org_id)
+    if not pplx_key:
+        conn.close()
+        raise HTTPException(400, "No SERPAPI_KEY env var and no Perplexity API key configured.")
+    query = f"academic research papers about: {body.query} — cite recent peer-reviewed studies"
+    try:
+        result = perplexity_search(pplx_key, query)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"Perplexity request failed: {str(e)}")
+    feed_id = save_intel_feed(conn, org_id, "google_scholar", body.query, result)
+    conn.close()
+    return {"feed_id": feed_id, "source": "google_scholar_via_perplexity", "query": body.query, "result": result}
+
+
+@app.get("/api/v1/orgs/{org_id}/intel/feeds")
+def intel_feeds_list(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, source, query, result_json, created_at FROM intelligence_feeds WHERE org_id = ? ORDER BY created_at DESC LIMIT 50",
+        (org_id,)
+    ).fetchall()
+    conn.close()
+    return [{"id": r["id"], "source": r["source"], "query": r["query"], "content": r["result_json"], "created_at": r["created_at"]} for r in rows]
+
+
+@app.get("/api/v1/orgs/{org_id}/intel/feeds/{feed_id}")
+def intel_feed_detail(org_id: str, feed_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM intelligence_feeds WHERE id = ? AND org_id = ?", (feed_id, org_id)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Feed not found")
+    return {**dict(row), "result_json": json.loads(row["result_json"])}
+
+
+@app.post("/api/v1/orgs/{org_id}/api-keys/firecrawl")
+def set_firecrawl_key(org_id: str, body: IntelApiKeyIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    conn.execute("UPDATE organizations SET firecrawl_api_key = ? WHERE id = ?", (body.api_key, org_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/v1/orgs/{org_id}/api-keys/perplexity")
+def set_perplexity_key(org_id: str, body: IntelApiKeyIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    conn.execute("UPDATE organizations SET perplexity_api_key = ? WHERE id = ?", (body.api_key, org_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/v1/orgs/{org_id}/ai/deep-analysis")
+def ai_deep_analysis(org_id: str, body: IntelDeepAnalysisIn, ctx: tuple[str, str] = Depends(require_org)):
+    check_org(org_id, ctx)
+    conn = get_db()
+    comp = conn.execute("SELECT * FROM competitors WHERE id = ? AND org_id = ?", (body.competitor_id, org_id)).fetchone()
+    if not comp:
+        conn.close()
+        raise HTTPException(404, "Competitor not found")
+
+    claude_key = get_api_key(conn, org_id)
+    if not claude_key:
+        conn.close()
+        raise HTTPException(400, "No Anthropic API key configured.")
+
+    intel_sections = []
+
+    # Firecrawl scrape (optional)
+    fc_key = get_firecrawl_key(conn, org_id)
+    if fc_key and comp["website_url"]:
+        try:
+            scrape = firecrawl_scrape(fc_key, comp["website_url"])
+            save_intel_feed(conn, org_id, "firecrawl", comp["website_url"], scrape)
+            md = scrape.get("data", {}).get("markdown", "")
+            if md:
+                intel_sections.append(f"## WEBSITE CONTENT (scraped)\n{md[:4000]}")
+        except Exception:
+            pass
+
+    # Perplexity news (optional)
+    pplx_key = get_perplexity_key(conn, org_id)
+    if pplx_key:
+        now = datetime.now(timezone.utc)
+        news_query = f"latest news about {comp['name']} {now.strftime('%B')} {now.year}"
+        try:
+            news = perplexity_search(pplx_key, news_query)
+            save_intel_feed(conn, org_id, "perplexity", news_query, news)
+            answer = news.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if answer:
+                intel_sections.append(f"## RECENT NEWS (from web search)\n{answer[:3000]}")
+        except Exception:
+            pass
+
+    # HackerNews (always free)
+    try:
+        hn_hits = hackernews_search(comp["name"])
+        if hn_hits:
+            save_intel_feed(conn, org_id, "hackernews", comp["name"], {"hits": hn_hits})
+            hn_text = "\n".join(f"- {h.get('title','')} ({h.get('points',0)} pts, {h.get('num_comments',0)} comments)" for h in hn_hits[:10])
+            intel_sections.append(f"## HACKERNEWS MENTIONS\n{hn_text}")
+    except Exception:
+        pass
+
+    # Reddit (always free)
+    try:
+        reddit_posts = reddit_search(comp["name"])
+        if reddit_posts:
+            save_intel_feed(conn, org_id, "reddit", comp["name"], {"posts": reddit_posts})
+            rd_text = "\n".join(f"- r/{p.get('subreddit','')} — {p.get('title','')} ({p.get('score',0)} upvotes)" for p in reddit_posts[:10])
+            intel_sections.append(f"## REDDIT MENTIONS\n{rd_text}")
+    except Exception:
+        pass
+
+    ctx_org = get_org_context(conn, org_id)
+    lens_block = format_lens_block(ctx_org["lens_weights"])
+    intel_block = "\n\n".join(intel_sections) if intel_sections else "No external intelligence could be gathered."
+
+    system = f"""You are an elite competitive intelligence analyst for Observatory. You have access to REAL gathered intelligence about this competitor. Use it to produce the most accurate, data-backed analysis possible.
+
+Evaluate through these weighted expert lenses:
+{lens_block}
+
+Be concrete, specific, and grounded in the actual intelligence provided."""
+
+    user_msg = f"""Deep analysis of {comp['name']} for {ctx_org['org_name']}.
+
+OUR PRODUCT: {ctx_org['product_description']}
+OUR PRODUCT AREAS: {', '.join(ctx_org['product_areas']) or 'not specified'}
+
+COMPETITOR:
+Name: {comp['name']}
+Website: {comp['website_url'] or 'not provided'}
+Context: {comp['description'] or 'not provided'}
+
+GATHERED INTELLIGENCE:
+{intel_block}
+
+Generate a comprehensive deep-analysis battlecard as JSON:
+{{
+  "overview": "3-4 sentence strategic summary grounded in real data",
+  "strengths": ["5-7 specific strengths backed by evidence"],
+  "weaknesses": ["5-7 specific weaknesses backed by evidence"],
+  "differentiators": ["5-7 ways WE can differentiate"],
+  "objections": [{{"objection": "...", "response": "..."}}],
+  "win_themes": ["4-5 themes"],
+  "loss_reasons": ["4-5 reasons"],
+  "pricing_posture": "pricing analysis",
+  "market_sentiment": "summary of how the market/community perceives this competitor based on HN, Reddit, reviews",
+  "recent_developments": "summary of recent news and changes",
+  "lens_analysis": {{""" + ", ".join(f'"{k}": "analysis from {LENS_PERSONAS.get(k, k)} perspective"' for k in ctx_org["lens_weights"]) + """}},
+  "recommended_actions": ["5-7 concrete actions"],
+  "intelligence_sources_used": ["list of sources that provided data"]
+}}"""
+
+    analysis = call_claude_json(claude_key, system, user_msg, max_tokens=6000)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("UPDATE competitors SET analysis_json = ?, analysis_at = ? WHERE id = ?",
+                 (json.dumps(analysis), now, body.competitor_id))
+    # Also save as ai_generation
+    conn.execute("INSERT INTO ai_generations (id, org_id, kind, payload_json) VALUES (?, ?, 'deep_analysis', ?)",
+                 (str(uuid.uuid4()), org_id, json.dumps({"competitor_id": body.competitor_id, "analysis": analysis})))
+    conn.commit()
+    conn.close()
+    return {"competitor_name": comp["name"], "analysis": analysis, "generated_at": now, "intel_sources": len(intel_sections)}
 
 
 @app.get("/health")

@@ -7,7 +7,25 @@
       "Bash(ls /tmp/)",
       "Bash(cygpath -w /tmp/observatory_unpacked/word/document.xml)",
       "Bash(docker --version)",
-      "Bash(git --version)"
+      "Bash(git --version)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_OwningProcess -Force -ErrorAction SilentlyContinue }\")",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique | ForEach-Object { Stop-Process -Id $_-Force -ErrorAction SilentlyContinue }\")",
+      "Bash(powershell -File:*)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //PID 11332 //F)",
+      "Bash(python -c \":*)",
+      "Bash(curl -s http://localhost:8000/api/v1/orgs/8928a934-70c6-4867-9b9a-8f5ad1d10e0f/ai/friction-scenarios -X POST -H \"Content-Type: application/json\" -H \"Authorization: Bearer test\")",
+      "Bash(curl -s http://localhost:8000/api/v1/auth/login -X POST -H \"Content-Type: application/json\" -d '{\"\"email\"\":\"\"brandon.sten@gmail.com\"\",\"\"password\"\":\"\"test1234\"\"}')",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMWU0MGU4Ni01NjBhLTQ3ZjAtYWQyOS01NThhZGRmN2VkYWMiLCJleHAiOjE3NzU1OTM0MjgsIm9yZ19pZCI6Ijg5MjhhOTM0LTcwYzYtNDg2Ny05YjlhLThmNWFkMWQxMGUwZiIsInJvbGUiOiJvd25lciJ9.RMryMBR30LfI1hiGXnyxXDdgiInba2n15RFIRnXtgYU\")",
+      "Bash(curl -s http://localhost:8000/api/v1/orgs/8928a934-70c6-4867-9b9a-8f5ad1d10e0f/ai/friction-scenarios -X POST -H \"Authorization: Bearer $TOKEN\")",
+      "Bash(echo $ANTHROPIC_API_KEY)",
+      "Bash(curl -s \"http://localhost:8000/api/v1/orgs/8928a934-70c6-4867-9b9a-8f5ad1d10e0f/ai/summary\" -H \"Authorization: Bearer $TOKEN\")",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/login)",
+      "Bash(curl -s http://localhost:3000/)",
+      "Bash(powershell -Command \"Get-Process -Id 3708 | Select-Object ProcessName, Path\")"
     ]
   }
 }
