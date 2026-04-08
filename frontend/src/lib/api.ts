@@ -654,4 +654,43 @@ export const chat = {
   },
 };
 
-export default { auth, friction, insights, scores, competitors, knowledge, battlecards, digests, research, onboarding, productAreas, dataSources, ai, org, serviceKeys, intel, apiKeys, chat };
+// ─── Cost Controls ───────────────────────────────────────────────────────
+export interface CostSummary {
+  daily: {
+    total_spend: number;
+    total_limit: number;
+    remaining: number;
+    by_service: Record<string, { spend: number; calls: number }>;
+  };
+  monthly: {
+    total_spend: number;
+    total_limit: number;
+    remaining: number;
+    by_service: Record<string, { spend: number; calls: number }>;
+  };
+  limits: Record<string, number>;
+  recent_calls: Array<{
+    service: string;
+    endpoint: string;
+    model: string | null;
+    estimated_cost_gbp: number;
+    input_tokens: number;
+    output_tokens: number;
+    created_at: string;
+  }>;
+}
+
+export const costs = {
+  summary: (orgId: string) => request<CostSummary>(`/orgs/${orgId}/costs`),
+  updateLimits: (orgId: string, limits: Record<string, number>) =>
+    request<{ ok: boolean; limits: Record<string, number> }>(`/orgs/${orgId}/costs/limits`, {
+      method: "PATCH",
+      body: JSON.stringify(limits),
+    }),
+  history: (orgId: string, days: number = 7) =>
+    request<Array<{ day: string; service: string; total: number; calls: number }>>(
+      `/orgs/${orgId}/costs/history?days=${days}`
+    ),
+};
+
+export default { auth, friction, insights, scores, competitors, knowledge, battlecards, digests, research, onboarding, productAreas, dataSources, ai, org, serviceKeys, intel, apiKeys, chat, costs };

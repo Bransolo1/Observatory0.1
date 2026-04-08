@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   Newspaper,
+  PoundSterling,
   Radar,
   Shield,
   Swords,
@@ -112,6 +113,15 @@ export function AppSidebar() {
           <SidebarGroupLabel>System</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  render={<Link href="/costs" />}
+                  isActive={pathname === "/costs"}
+                >
+                  <PoundSterling className="h-4 w-4" />
+                  <span>Cost Controls</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
                   render={<Link href="/settings" />}

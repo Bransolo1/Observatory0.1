@@ -28,6 +28,13 @@ except ImportError:
 
 import httpx
 
+from cost_controls import (
+    init_cost_tables, tracker,
+    guard_anthropic, guard_perplexity, guard_firecrawl, guard_serpapi,
+    log_anthropic_usage, log_perplexity_usage, log_firecrawl_usage,
+    log_serpapi_usage, log_free_usage, DEFAULT_LIMITS,
+)
+
 DB_PATH = "observatory_dev.db"
 JWT_SECRET = "dev-secret-change-in-production"
 JWT_ALGORITHM = "HS256"
@@ -171,6 +178,8 @@ def init_db():
     if "analysis_json" not in cols:
         conn.execute("ALTER TABLE competitors ADD COLUMN analysis_json TEXT")
         conn.execute("ALTER TABLE competitors ADD COLUMN analysis_at TEXT")
+    # Init cost tracking tables
+    init_cost_tables(conn)
     # Migrate existing orgs: merge lens_weights with new 7-lens defaults
     for org_row in conn.execute("SELECT id, lens_weights FROM organizations").fetchall():
         existing = json.loads(org_row["lens_weights"] or "{}")
@@ -302,28 +311,47 @@ def get_perplexity_key(conn, org_id: str) -> str | None:
     return key or os.environ.get("PERPLEXITY_API_KEY") or None
 
 
-def firecrawl_scrape(api_key: str, url: str) -> dict:
+def firecrawl_scrape(api_key: str, url: str, org_id: str = "") -> dict:
     """Scrape a single URL with Firecrawl."""
+    if org_id:
+        ok, reason = guard_firecrawl(org_id, pages=1)
+        if not ok:
+            raise HTTPException(429, f"Cost limit reached: {reason}")
     r = httpx.post("https://api.firecrawl.dev/v1/scrape",
                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                    json={"url": url, "formats": ["markdown"]},
                    timeout=60.0)
     r.raise_for_status()
+    if org_id:
+        log_firecrawl_usage(org_id, "scrape", pages=1)
     return r.json()
 
 
-def firecrawl_crawl(api_key: str, url: str, max_pages: int = 10) -> dict:
+def firecrawl_crawl(api_key: str, url: str, max_pages: int = 10, org_id: str = "") -> dict:
     """Crawl multiple pages with Firecrawl."""
+    # Hard cap on pages
+    limits = tracker._get_limits(org_id) if org_id else DEFAULT_LIMITS
+    max_pages = min(max_pages, limits.max_crawl_pages)
+    if org_id:
+        ok, reason = guard_firecrawl(org_id, pages=max_pages)
+        if not ok:
+            raise HTTPException(429, f"Cost limit reached: {reason}")
     r = httpx.post("https://api.firecrawl.dev/v1/crawl",
                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                    json={"url": url, "limit": max_pages, "scrapeOptions": {"formats": ["markdown"]}},
                    timeout=120.0)
     r.raise_for_status()
+    if org_id:
+        log_firecrawl_usage(org_id, "crawl", pages=max_pages)
     return r.json()
 
 
-def perplexity_search(api_key: str, query: str) -> dict:
+def perplexity_search(api_key: str, query: str, org_id: str = "") -> dict:
     """Search the web with Perplexity Sonar."""
+    if org_id:
+        ok, reason = guard_perplexity(org_id)
+        if not ok:
+            raise HTTPException(429, f"Cost limit reached: {reason}")
     r = httpx.post("https://api.perplexity.ai/chat/completions",
                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                    json={
@@ -332,19 +360,23 @@ def perplexity_search(api_key: str, query: str) -> dict:
                    },
                    timeout=30.0)
     r.raise_for_status()
+    if org_id:
+        log_perplexity_usage(org_id, "web_search")
     return r.json()
 
 
-def hackernews_search(query: str, hits: int = 20) -> list[dict]:
+def hackernews_search(query: str, hits: int = 20, org_id: str = "") -> list[dict]:
     """Search HN via Algolia (free, no auth)."""
     r = httpx.get("https://hn.algolia.com/api/v1/search",
                   params={"query": query, "tags": "story", "hitsPerPage": hits},
                   timeout=15.0)
     r.raise_for_status()
+    if org_id:
+        log_free_usage(org_id, "hackernews", "search")
     return r.json().get("hits", [])
 
 
-def reddit_search(query: str, subreddit: str | None = None, limit: int = 25) -> list[dict]:
+def reddit_search(query: str, subreddit: str | None = None, limit: int = 25, org_id: str = "") -> list[dict]:
     """Search Reddit (free, no auth needed with User-Agent)."""
     url = f"https://old.reddit.com/r/{subreddit}/search.json" if subreddit else "https://old.reddit.com/search.json"
     r = httpx.get(url,
@@ -352,6 +384,8 @@ def reddit_search(query: str, subreddit: str | None = None, limit: int = 25) -> 
                   headers={"User-Agent": "Observatory/1.0 (Consumer Intelligence Platform)"},
                   timeout=15.0)
     r.raise_for_status()
+    if org_id:
+        log_free_usage(org_id, "reddit", "search")
     data = r.json().get("data", {}).get("children", [])
     return [c["data"] for c in data]
 
@@ -373,15 +407,26 @@ def claude_client(api_key: str):
     return anthropic.Anthropic(api_key=api_key)
 
 
-def call_claude(api_key: str, system: str, user_message: str, max_tokens: int = 4000) -> str:
+def call_claude(api_key: str, system: str, user_message: str, max_tokens: int = 4000, org_id: str = "") -> str:
+    # ── Cost guard ──
+    limits = tracker._get_limits(org_id) if org_id else DEFAULT_LIMITS
+    capped_tokens = min(max_tokens, limits.max_tokens_per_request)
+    if org_id:
+        ok, reason = guard_anthropic(org_id, CLAUDE_MODEL, capped_tokens)
+        if not ok:
+            raise HTTPException(429, f"Cost limit reached: {reason}")
     client = claude_client(api_key)
     try:
         resp = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=max_tokens,
+            max_tokens=capped_tokens,
             system=system,
             messages=[{"role": "user", "content": user_message}],
         )
+        # ── Log actual usage ──
+        if org_id:
+            log_anthropic_usage(org_id, CLAUDE_MODEL, "call_claude",
+                                resp.usage.input_tokens, resp.usage.output_tokens)
         return resp.content[0].text
     except anthropic.AuthenticationError:
         raise HTTPException(401, "Invalid Anthropic API key. Update it in Settings.")
@@ -389,8 +434,8 @@ def call_claude(api_key: str, system: str, user_message: str, max_tokens: int = 
         raise HTTPException(502, f"Claude API error: {str(e)}")
 
 
-def call_claude_json(api_key: str, system: str, user_message: str, max_tokens: int = 4000) -> dict:
-    text = call_claude(api_key, system + "\n\nRespond with ONLY valid JSON. No markdown fences, no preamble.", user_message, max_tokens)
+def call_claude_json(api_key: str, system: str, user_message: str, max_tokens: int = 4000, org_id: str = "") -> dict:
+    text = call_claude(api_key, system + "\n\nRespond with ONLY valid JSON. No markdown fences, no preamble.", user_message, max_tokens, org_id=org_id)
     # Strip fences if present
     text = text.strip()
     if text.startswith("```"):
@@ -826,7 +871,7 @@ Generate a comprehensive battlecard as JSON with exactly this schema:
   "recommended_actions": ["3-4 concrete things the product/GTM team should consider"]
 }}"""
 
-    analysis = call_claude_json(api_key, system, user_msg, max_tokens=4000)
+    analysis = call_claude_json(api_key, system, user_msg, max_tokens=4000, org_id=org_id)
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("UPDATE competitors SET analysis_json = ?, analysis_at = ? WHERE id = ?",
                  (json.dumps(analysis), now, competitor_id))
@@ -929,7 +974,7 @@ Based on common friction patterns for this type of product, propose 5-7 plausibl
   ]
 }}"""
 
-    result = call_claude_json(api_key, system, user_msg)
+    result = call_claude_json(api_key, system, user_msg, org_id=org_id)
     _save_generation(conn, org_id, "friction", result)
     conn.close()
     return {"items": result.get("items", []), "generated_at": datetime.now(timezone.utc).isoformat()}
@@ -984,7 +1029,7 @@ Generate 4-6 prioritised experiment recommendations. Return JSON:
   ]
 }}"""
 
-    result = call_claude_json(api_key, system, user_msg)
+    result = call_claude_json(api_key, system, user_msg, org_id=org_id)
     _save_generation(conn, org_id, "experiments", result)
     conn.close()
     return {"items": result.get("items", []), "generated_at": datetime.now(timezone.utc).isoformat()}
@@ -1012,7 +1057,7 @@ EXPERT LENSES (weigh your answer proportionally):
 
 Answer crisply, concretely, with an opinion. When appropriate, structure your answer through the configured expert lenses. Keep answers under 300 words unless complexity demands more."""
 
-    answer = call_claude(api_key, system, body.question, max_tokens=1500)
+    answer = call_claude(api_key, system, body.question, max_tokens=1500, org_id=org_id)
     return {"answer": answer, "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
@@ -1110,7 +1155,7 @@ Synthesize 4-6 cross-cutting insights. Return JSON:
   ]
 }}"""
 
-    result = call_claude_json(api_key, system, user_msg)
+    result = call_claude_json(api_key, system, user_msg, org_id=org_id)
     _save_generation(conn, org_id, "insights", result)
     conn.close()
     return {"items": result.get("items", []), "generated_at": datetime.now(timezone.utc).isoformat()}
@@ -1178,7 +1223,7 @@ Identify 3-5 knowledge gaps and produce a research brief for each. Return JSON:
   ]
 }}"""
 
-    result = call_claude_json(api_key, system, user_msg)
+    result = call_claude_json(api_key, system, user_msg, org_id=org_id)
     _save_generation(conn, org_id, "research", result)
     conn.close()
     return {"items": result.get("items", []), "generated_at": datetime.now(timezone.utc).isoformat()}
@@ -1252,7 +1297,7 @@ Produce a structured digest. Return JSON:
   "top_actions": ["3-5 specific recommended actions for this week"]
 }}"""
 
-    result = call_claude_json(api_key, system, user_msg, max_tokens=4000)
+    result = call_claude_json(api_key, system, user_msg, max_tokens=4000, org_id=org_id)
     _save_generation(conn, org_id, "digest", result)
     conn.close()
     return {"digest": result, "generated_at": datetime.now(timezone.utc).isoformat()}
@@ -1374,7 +1419,9 @@ def intel_scrape_competitor(org_id: str, body: IntelScrapeIn, ctx: tuple[str, st
         conn.close()
         raise HTTPException(400, "No URL available for this competitor")
     try:
-        result = firecrawl_scrape(api_key, target_url)
+        result = firecrawl_scrape(api_key, target_url, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except httpx.HTTPStatusError as e:
         conn.close()
         raise HTTPException(e.response.status_code, f"Firecrawl error: {e.response.text[:500]}")
@@ -1399,7 +1446,9 @@ def intel_crawl_competitor(org_id: str, body: IntelCrawlIn, ctx: tuple[str, str]
         conn.close()
         raise HTTPException(400, "No URL available for this competitor")
     try:
-        result = firecrawl_crawl(api_key, target_url, body.max_pages or 10)
+        result = firecrawl_crawl(api_key, target_url, body.max_pages or 10, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except httpx.HTTPStatusError as e:
         conn.close()
         raise HTTPException(e.response.status_code, f"Firecrawl error: {e.response.text[:500]}")
@@ -1420,7 +1469,9 @@ def intel_web_search(org_id: str, body: IntelWebSearchIn, ctx: tuple[str, str] =
         conn.close()
         raise HTTPException(400, "No Perplexity API key configured. Add one in Settings or set PERPLEXITY_API_KEY env var.")
     try:
-        result = perplexity_search(api_key, body.query)
+        result = perplexity_search(api_key, body.query, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except httpx.HTTPStatusError as e:
         conn.close()
         raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
@@ -1447,7 +1498,9 @@ def intel_competitor_news(org_id: str, body: IntelCompetitorNewsIn, ctx: tuple[s
     now = datetime.now(timezone.utc)
     query = f"latest news about {comp['name']} {now.strftime('%B')} {now.year}"
     try:
-        result = perplexity_search(api_key, query)
+        result = perplexity_search(api_key, query, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except httpx.HTTPStatusError as e:
         conn.close()
         raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
@@ -1471,7 +1524,7 @@ def intel_hackernews_scan(org_id: str, body: IntelHNScanIn, ctx: tuple[str, str]
         conn.close()
         raise HTTPException(400, "No query provided and no competitors configured")
     try:
-        hits = hackernews_search(query)
+        hits = hackernews_search(query, org_id=org_id)
     except Exception as e:
         conn.close()
         raise HTTPException(502, f"HackerNews search failed: {str(e)}")
@@ -1493,7 +1546,7 @@ def intel_reddit_scan(org_id: str, body: IntelRedditScanIn, ctx: tuple[str, str]
         conn.close()
         raise HTTPException(400, "No query provided and no competitors configured")
     try:
-        posts = reddit_search(query, body.subreddit)
+        posts = reddit_search(query, body.subreddit, org_id=org_id)
     except Exception as e:
         conn.close()
         raise HTTPException(502, f"Reddit search failed: {str(e)}")
@@ -1518,7 +1571,9 @@ def intel_scan_reviews(org_id: str, body: IntelReviewScanIn, ctx: tuple[str, str
     platform = body.platform or "G2 Capterra Trustpilot"
     query = f"{comp['name']} reviews {platform} 2024 2025 — summarize key themes, pros, cons, and ratings"
     try:
-        result = perplexity_search(api_key, query)
+        result = perplexity_search(api_key, query, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except httpx.HTTPStatusError as e:
         conn.close()
         raise HTTPException(e.response.status_code, f"Perplexity error: {e.response.text[:500]}")
@@ -1536,12 +1591,19 @@ def intel_academic_search(org_id: str, body: IntelAcademicIn, ctx: tuple[str, st
     conn = get_db()
     serpapi_key = os.environ.get("SERPAPI_KEY")
     if serpapi_key:
+        ok, reason = guard_serpapi(org_id)
+        if not ok:
+            conn.close()
+            raise HTTPException(429, f"Cost limit reached: {reason}")
         try:
             r = httpx.get("https://serpapi.com/search",
                           params={"engine": "google_scholar", "q": body.query, "api_key": serpapi_key},
                           timeout=15.0)
             r.raise_for_status()
             result = r.json()
+            log_serpapi_usage(org_id, "academic_search")
+        except HTTPException:
+            conn.close(); raise
         except Exception as e:
             conn.close()
             raise HTTPException(502, f"SerpAPI request failed: {str(e)}")
@@ -1555,7 +1617,9 @@ def intel_academic_search(org_id: str, body: IntelAcademicIn, ctx: tuple[str, st
         raise HTTPException(400, "No SERPAPI_KEY env var and no Perplexity API key configured.")
     query = f"academic research papers about: {body.query} — cite recent peer-reviewed studies"
     try:
-        result = perplexity_search(pplx_key, query)
+        result = perplexity_search(pplx_key, query, org_id=org_id)
+    except HTTPException:
+        conn.close(); raise
     except Exception as e:
         conn.close()
         raise HTTPException(502, f"Perplexity request failed: {str(e)}")
@@ -1629,7 +1693,7 @@ def ai_deep_analysis(org_id: str, body: IntelDeepAnalysisIn, ctx: tuple[str, str
     fc_key = get_firecrawl_key(conn, org_id)
     if fc_key and comp["website_url"]:
         try:
-            scrape = firecrawl_scrape(fc_key, comp["website_url"])
+            scrape = firecrawl_scrape(fc_key, comp["website_url"], org_id=org_id)
             save_intel_feed(conn, org_id, "firecrawl", comp["website_url"], scrape)
             md = scrape.get("data", {}).get("markdown", "")
             if md:
@@ -1643,7 +1707,7 @@ def ai_deep_analysis(org_id: str, body: IntelDeepAnalysisIn, ctx: tuple[str, str
         now = datetime.now(timezone.utc)
         news_query = f"latest news about {comp['name']} {now.strftime('%B')} {now.year}"
         try:
-            news = perplexity_search(pplx_key, news_query)
+            news = perplexity_search(pplx_key, news_query, org_id=org_id)
             save_intel_feed(conn, org_id, "perplexity", news_query, news)
             answer = news.get("choices", [{}])[0].get("message", {}).get("content", "")
             if answer:
@@ -1653,7 +1717,7 @@ def ai_deep_analysis(org_id: str, body: IntelDeepAnalysisIn, ctx: tuple[str, str
 
     # HackerNews (always free)
     try:
-        hn_hits = hackernews_search(comp["name"])
+        hn_hits = hackernews_search(comp["name"], org_id=org_id)
         if hn_hits:
             save_intel_feed(conn, org_id, "hackernews", comp["name"], {"hits": hn_hits})
             hn_text = "\n".join(f"- {h.get('title','')} ({h.get('points',0)} pts, {h.get('num_comments',0)} comments)" for h in hn_hits[:10])
@@ -1663,7 +1727,7 @@ def ai_deep_analysis(org_id: str, body: IntelDeepAnalysisIn, ctx: tuple[str, str
 
     # Reddit (always free)
     try:
-        reddit_posts = reddit_search(comp["name"])
+        reddit_posts = reddit_search(comp["name"], org_id=org_id)
         if reddit_posts:
             save_intel_feed(conn, org_id, "reddit", comp["name"], {"posts": reddit_posts})
             rd_text = "\n".join(f"- r/{p.get('subreddit','')} — {p.get('title','')} ({p.get('score',0)} upvotes)" for p in reddit_posts[:10])
@@ -1712,7 +1776,7 @@ Generate a comprehensive deep-analysis battlecard as JSON:
   "intelligence_sources_used": ["list of sources that provided data"]
 }}"""
 
-    analysis = call_claude_json(claude_key, system, user_msg, max_tokens=6000)
+    analysis = call_claude_json(claude_key, system, user_msg, max_tokens=6000, org_id=org_id)
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("UPDATE competitors SET analysis_json = ?, analysis_at = ? WHERE id = ?",
                  (json.dumps(analysis), now, body.competitor_id))
@@ -1891,24 +1955,36 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
     tool_api_v1 = f"http://localhost:8000/api/v1/orgs/{org_id}"
     tool_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+    # ── Cost-controlled limits for chat ──
+    chat_limits = tracker._get_limits(org_id)
+
     def run_specialist(specialist_name, question, context_text):
-        """Run a nested specialist agent loop. Returns (response_text, events_list)."""
+        """Run a nested specialist agent loop with cost controls."""
         spec_prompt = build_specialist_prompt(specialist_name, ctx_org)
         spec_tools = get_specialist_tools(specialist_name, AGENT_TOOLS)
         spec_client = anthropic.Anthropic(api_key=api_key)
         spec_messages = [{"role": "user", "content": f"{question}\n\nContext: {context_text}" if context_text else question}]
         events = []
         spec_text = ""
+        max_spec_tokens = min(3000, chat_limits.max_tokens_per_request)
 
-        for _ in range(10):  # max 10 iterations for specialists
+        for _ in range(chat_limits.max_specialist_iterations):
+            # Budget check before each specialist Claude call
+            ok, reason = guard_anthropic(org_id, CLAUDE_MODEL, max_spec_tokens)
+            if not ok:
+                spec_text += f"\n[Specialist stopped: {reason}]"
+                break
             try:
                 spec_response = spec_client.messages.create(
                     model=CLAUDE_MODEL,
-                    max_tokens=3000,
+                    max_tokens=max_spec_tokens,
                     system=spec_prompt,
                     tools=spec_tools,
                     messages=spec_messages,
                 )
+                # Log actual usage
+                log_anthropic_usage(org_id, CLAUDE_MODEL, f"specialist/{specialist_name}",
+                                    spec_response.usage.input_tokens, spec_response.usage.output_tokens)
             except Exception as e:
                 return f"Error consulting specialist: {e}", events
 
@@ -1943,12 +2019,19 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
         client = anthropic.Anthropic(api_key=api_key)
         full_text = ""
         tool_calls_list = []
+        specialist_consults_this_turn = 0
+        max_cco_tokens = min(4096, chat_limits.max_tokens_per_request)
 
-        for iteration in range(25):
+        for iteration in range(chat_limits.max_chat_iterations):
+            # Budget check before each CCO Claude call
+            ok, reason = guard_anthropic(org_id, CLAUDE_MODEL, max_cco_tokens)
+            if not ok:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Cost limit reached: {reason}'})}\n\n"
+                break
             try:
                 with client.messages.stream(
                     model=CLAUDE_MODEL,
-                    max_tokens=4096,
+                    max_tokens=max_cco_tokens,
                     system=system,
                     tools=AGENT_TOOLS,
                     messages=messages,
@@ -1963,6 +2046,9 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
                                 yield f"data: {json.dumps({'type': 'text', 'content': event.delta.text})}\n\n"
 
                     response = stream.get_final_message()
+                    # Log actual usage for the CCO call
+                    log_anthropic_usage(org_id, CLAUDE_MODEL, "chat/cco",
+                                        response.usage.input_tokens, response.usage.output_tokens)
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                 break
@@ -1981,6 +2067,12 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
 
                     # Special handling for consult_specialist
                     if block.name == "consult_specialist":
+                        # Enforce specialist consult cap per turn
+                        if specialist_consults_this_turn >= chat_limits.max_specialist_consults_per_turn:
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id,
+                                                 "content": f"Specialist consultation limit reached ({chat_limits.max_specialist_consults_per_turn} per turn). Synthesize from the specialists already consulted."})
+                            continue
+
                         specialist_name = block.input.get("specialist", "")
                         spec_question = block.input.get("question", "")
                         spec_context = block.input.get("context", "")
@@ -1989,6 +2081,7 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
                         yield f"data: {json.dumps({'type': 'specialist_start', 'specialist': specialist_name, 'display_name': display_name, 'question': spec_question})}\n\n"
 
                         spec_result, spec_events = run_specialist(specialist_name, spec_question, spec_context)
+                        specialist_consults_this_turn += 1
 
                         # Emit specialist's tool activity
                         for se in spec_events:
@@ -2026,9 +2119,72 @@ Respond conversationally using markdown. After consulting specialists, synthesiz
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ─── Cost Control Endpoints ────────────────────────────────────────────────
+
+@app.get("/api/v1/orgs/{org_id}/costs")
+def get_costs(org_id: str, ctx: tuple[str, str] = Depends(require_org)):
+    """Get real-time spend dashboard: daily/monthly totals, per-service breakdown, limits, recent calls."""
+    check_org(org_id, ctx)
+    return tracker.get_spend_summary(org_id)
+
+
+class BudgetUpdateIn(BaseModel):
+    daily_anthropic: float | None = None
+    daily_perplexity: float | None = None
+    daily_firecrawl: float | None = None
+    daily_serpapi: float | None = None
+    daily_total: float | None = None
+    monthly_anthropic: float | None = None
+    monthly_perplexity: float | None = None
+    monthly_firecrawl: float | None = None
+    monthly_serpapi: float | None = None
+    monthly_total: float | None = None
+    max_tokens_per_request: int | None = None
+    max_chat_iterations: int | None = None
+    max_specialist_iterations: int | None = None
+    max_crawl_pages: int | None = None
+    max_specialist_consults_per_turn: int | None = None
+
+
+@app.patch("/api/v1/orgs/{org_id}/costs/limits")
+def update_cost_limits(org_id: str, body: BudgetUpdateIn, ctx: tuple[str, str] = Depends(require_org)):
+    """Update spending limits for this org. Only owner/admin should call this."""
+    check_org(org_id, ctx)
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "No limits provided")
+    # Merge with existing
+    current = tracker._get_limits(org_id)
+    merged = {}
+    for field in vars(current):
+        if not field.startswith("_"):
+            merged[field] = updates.get(field, getattr(current, field))
+    tracker.update_limits(org_id, merged)
+    return {"ok": True, "limits": merged}
+
+
+@app.get("/api/v1/orgs/{org_id}/costs/history")
+def cost_history(org_id: str, days: int = 7, ctx: tuple[str, str] = Depends(require_org)):
+    """Get daily spend totals for the last N days."""
+    check_org(org_id, ctx)
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT date(created_at) as day, service,
+                  COALESCE(SUM(estimated_cost_gbp), 0) as total,
+                  COUNT(*) as calls
+           FROM api_cost_log
+           WHERE org_id = ? AND created_at >= date('now', ?)
+           GROUP BY day, service
+           ORDER BY day DESC""",
+        (org_id, f"-{days} days")
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "0.4.0-chat", "mode": "sqlite", "claude": ANTHROPIC_AVAILABLE}
+    return {"status": "healthy", "version": "0.5.0-cost-controls", "mode": "sqlite", "claude": ANTHROPIC_AVAILABLE}
 
 
 if __name__ == "__main__":
