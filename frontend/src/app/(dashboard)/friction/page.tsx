@@ -45,7 +45,8 @@ export default function FrictionPage() {
 
   if (isLoading) return <Skeleton className="h-64" />;
 
-  const items = data?.scenarios || data?.items || [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const items: any[] = (data as any)?.scenarios || (data as any)?.items || [];
   const hasKey = summary?.has_api_key ?? false;
 
   return (

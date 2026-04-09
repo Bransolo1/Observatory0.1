@@ -39,7 +39,8 @@ export default function ScoresPage() {
 
   if (isLoading) return <Skeleton className="h-64" />;
 
-  const items = data?.ideas || data?.items || [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const items: any[] = (data as any)?.ideas || (data as any)?.items || [];
   const hasKey = summary?.has_api_key ?? false;
 
   return (
@@ -97,28 +98,28 @@ export default function ScoresPage() {
                     <div className="flex-1">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
                         <p className="font-semibold text-sm">{exp.title as string}</p>
-                        {exp.expected_impact && (
+                        {exp.expected_impact ? (
                           <Badge variant="secondary" className="text-[10px]">
                             {exp.expected_impact as string} impact
                           </Badge>
-                        )}
-                        {exp.effort_estimate && (
+                        ) : null}
+                        {exp.effort_estimate ? (
                           <Badge variant="outline" className="text-[10px]">
                             {exp.effort_estimate as string} effort
                           </Badge>
-                        )}
+                        ) : null}
                       </div>
                       <p className="text-xs text-muted-foreground">{exp.hypothesis as string}</p>
-                      {exp.product_area && (
+                      {exp.product_area ? (
                         <p className="text-xs text-muted-foreground mt-1">
                           Area: {exp.product_area as string}
                         </p>
-                      )}
-                      {exp.success_metric && (
+                      ) : null}
+                      {exp.success_metric ? (
                         <p className="text-xs mt-1.5 p-2 bg-zinc-50 dark:bg-zinc-900 rounded">
                           <span className="font-medium">Success metric:</span> {exp.success_metric as string}
                         </p>
-                      )}
+                      ) : null}
                       <LensBreakdown analysis={exp.lens_analysis as Record<string, string>} />
                     </div>
                   </div>

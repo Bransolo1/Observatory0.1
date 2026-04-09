@@ -100,24 +100,24 @@ export default function InsightsPage() {
                     <Badge variant="outline" className={CAT_COLOR[ins.category as string] || ""}>
                       {ins.category as string}
                     </Badge>
-                    {ins.confidence && (
+                    {ins.confidence ? (
                       <span className="text-[10px] text-muted-foreground">
                         {Math.round((ins.confidence as number) * 100)}% confidence
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <h3 className="font-semibold text-sm">{ins.title as string}</h3>
                   <p className="text-sm text-muted-foreground mt-1">{ins.summary as string}</p>
-                  {ins.detail && (
+                  {ins.detail ? (
                     <p className="text-xs text-muted-foreground mt-1">{ins.detail as string}</p>
-                  )}
-                  {(ins.related_areas as string[])?.length > 0 && (
+                  ) : null}
+                  {(ins.related_areas as string[])?.length > 0 ? (
                     <div className="flex gap-1 mt-2 flex-wrap">
                       {(ins.related_areas as string[]).map((a) => (
                         <Badge key={a} variant="secondary" className="text-[10px]">{a}</Badge>
                       ))}
                     </div>
-                  )}
+                  ) : null}
                   <LensBreakdown analysis={ins.lens_analysis as Record<string, string>} />
                 </CardContent>
               </Card>
