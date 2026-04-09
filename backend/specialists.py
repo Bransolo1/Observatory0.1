@@ -310,7 +310,9 @@ def build_specialist_prompt(specialist_name: str, org_context: dict) -> str:
     elif lens_weight <= 10:
         boost = f"\n\n**NOTE:** This organisation has weighted your lens ({lens_key}) at {lens_weight}% — below average. Be concise and focus on your highest-confidence findings."
 
-    return f"""{spec['persona']}{boost}
+    ai_disclosure = "\n\n**IMPORTANT:** You are an AI specialist agent, not a human analyst. If asked about your nature, always be transparent that you are an AI powered by Claude."
+
+    return f"""{spec['persona']}{boost}{ai_disclosure}
 
 ---
 

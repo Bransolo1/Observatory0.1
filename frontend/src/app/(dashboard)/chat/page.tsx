@@ -19,7 +19,12 @@ import {
   Users,
   ChevronDown,
   ChevronUp,
+  ThumbsUp,
+  ThumbsDown,
+  Square,
+  Sparkles,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 const SPECIALIST_COLORS: Record<string, string> = {
   behavioural_scientist: "border-purple-300 bg-purple-50 dark:border-purple-700 dark:bg-purple-950/30",
@@ -70,8 +75,10 @@ export default function ChatPage() {
   const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
   const [specialists, setSpecialists] = useState<SpecialistActivity[]>([]);
   const [expandedSpecialists, setExpandedSpecialists] = useState<Set<string>>(new Set());
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const { data: conversations, refetch: refetchConversations } = useQuery({
     queryKey: ["chat-conversations", orgId],
@@ -122,6 +129,24 @@ export default function ChatPage() {
     });
   };
 
+  const stopStreaming = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+  };
+
+  const giveFeedback = async (msgId: string, rating: "up" | "down") => {
+    if (!activeConvId) return;
+    setFeedbackGiven((prev) => ({ ...prev, [msgId]: rating }));
+    try {
+      const token = localStorage.getItem("observatory_token");
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/orgs/${orgId}/chat/conversations/${activeConvId}/messages/${msgId}/feedback`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ rating }),
+      });
+    } catch { /* silent */ }
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || isStreaming) return;
 
@@ -145,6 +170,8 @@ export default function ChatPage() {
     setStreamingText("");
     setToolActivity([]);
     setSpecialists([]);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       const response = await chat.sendMessage(orgId, convId, userMessage.content);
@@ -314,9 +341,14 @@ export default function ChatPage() {
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <Users className="h-12 w-12 text-muted-foreground mb-4" />
-              <h2 className="text-lg font-semibold mb-1">Chief Consumer Officer</h2>
+              <div className="flex items-center gap-2 mb-1">
+                <h2 className="text-lg font-semibold">Chief Consumer Officer</h2>
+                <Badge variant="secondary" className="text-[10px]">
+                  <Sparkles className="h-2.5 w-2.5 mr-0.5" /> AI-Powered
+                </Badge>
+              </div>
               <p className="text-sm text-muted-foreground max-w-md">
-                I lead a team of 8 specialist analysts — behavioural scientists, researchers,
+                I lead a team of 8 AI specialist analysts — behavioural scientists, researchers,
                 clinicians, strategists, and more. Ask me anything and I&apos;ll consult the right
                 experts to give you a synthesized, multi-lens answer.
               </p>
@@ -358,6 +390,24 @@ export default function ChatPage() {
                   <p className="text-sm">{msg.content}</p>
                 ) : (
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                )}
+                {msg.role === "assistant" && (
+                  <div className="flex items-center gap-1 mt-2">
+                    <button
+                      onClick={() => giveFeedback(msg.id, "up")}
+                      className={`p-1 rounded hover:bg-muted transition-colors ${feedbackGiven[msg.id] === "up" ? "text-green-600" : "text-muted-foreground"}`}
+                      aria-label="Helpful response"
+                    >
+                      <ThumbsUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => giveFeedback(msg.id, "down")}
+                      className={`p-1 rounded hover:bg-muted transition-colors ${feedbackGiven[msg.id] === "down" ? "text-red-600" : "text-muted-foreground"}`}
+                      aria-label="Unhelpful response"
+                    >
+                      <ThumbsDown className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 )}
               </div>
               {msg.role === "user" && (
@@ -493,21 +543,38 @@ export default function ChatPage() {
               rows={1}
               className="flex-1 resize-none rounded-lg border bg-background px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
               style={{ minHeight: "2.5rem", maxHeight: "8rem" }}
+              aria-label="Message input"
               onInput={(e) => {
                 const target = e.target as HTMLTextAreaElement;
                 target.style.height = "auto";
                 target.style.height = Math.min(target.scrollHeight, 128) + "px";
               }}
             />
-            <Button
-              size="icon"
-              onClick={sendMessage}
-              disabled={!input.trim() || isStreaming}
-              className="shrink-0 h-10 w-10"
-            >
-              {isStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </Button>
+            {isStreaming ? (
+              <Button
+                size="icon"
+                variant="destructive"
+                onClick={stopStreaming}
+                className="shrink-0 h-10 w-10"
+                aria-label="Stop generating"
+              >
+                <Square className="h-4 w-4" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                onClick={sendMessage}
+                disabled={!input.trim()}
+                className="shrink-0 h-10 w-10"
+                aria-label="Send message"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            )}
           </div>
+          <p className="text-[10px] text-muted-foreground text-center mt-2 max-w-3xl mx-auto">
+            AI-generated responses may contain errors. Verify important information independently.
+          </p>
         </div>
       </div>
     </div>

@@ -137,6 +137,7 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="p-4">
+        <p className="text-[10px] text-muted-foreground mb-2">Powered by Claude AI</p>
         <div className="flex items-center justify-between">
           <div className="text-sm truncate">
             <p className="font-medium truncate">{user?.name}</p>

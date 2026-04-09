@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, X, CheckCircle2, Copy, Trash2, Key } from "lucide-react";
+import { Plus, X, CheckCircle2, Copy, Trash2, Key, Download, AlertTriangle, Shield } from "lucide-react";
 import { LENS_DEFINITIONS, setLensWeight as calcLensWeight, mergeLensWeights } from "@/lib/lenses";
 import { DATA_SOURCE_CATALOG, DATA_SOURCE_TYPE_LABEL } from "@/lib/data-sources";
 
@@ -31,6 +31,7 @@ export default function SettingsPage() {
           <TabsTrigger value="product">Product</TabsTrigger>
           <TabsTrigger value="sources">Data Sources</TabsTrigger>
           <TabsTrigger value="lenses">Analytical Lenses</TabsTrigger>
+          <TabsTrigger value="privacy">Data &amp; Privacy</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile" className="mt-4 space-y-4">
@@ -61,6 +62,10 @@ export default function SettingsPage() {
 
         <TabsContent value="lenses" className="mt-4 space-y-4">
           {orgId && <LensesSection orgId={orgId} />}
+        </TabsContent>
+
+        <TabsContent value="privacy" className="mt-4 space-y-4">
+          {orgId && <DataPrivacySection orgId={orgId} />}
         </TabsContent>
       </Tabs>
     </div>
@@ -551,6 +556,110 @@ function LensesSection({ orgId }: { orgId: string }) {
         </Button>
       </CardContent>
     </Card>
+  );
+}
+
+function DataPrivacySection({ orgId }: { orgId: string }) {
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const token = localStorage.getItem("observatory_token");
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/orgs/${orgId}/export`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `observatory-export-${new Date().toISOString().split("T")[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* silent */ }
+    setExporting(false);
+  };
+
+  const clearData = async () => {
+    setClearing(true);
+    try {
+      const token = localStorage.getItem("observatory_token");
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/orgs/${orgId}/data`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setShowClearConfirm(false);
+    } catch { /* silent */ }
+    setClearing(false);
+  };
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Shield className="h-4 w-4" /> Data Handling
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <p>Observatory processes your data as follows:</p>
+          <ul className="list-disc pl-5 space-y-1">
+            <li>Product context, competitors, and chat messages are sent to <strong>Anthropic (Claude)</strong> for AI analysis</li>
+            <li>Intelligence queries are sent to <strong>Perplexity</strong> and <strong>Firecrawl</strong> when you use those tools</li>
+            <li>API keys are stored encrypted at rest using AES-256 derived encryption</li>
+            <li>All data is stored locally in your SQLite database — no external data storage</li>
+            <li>HackerNews and Reddit searches use free public APIs with no authentication</li>
+          </ul>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Download className="h-4 w-4" /> Export Your Data
+          </CardTitle>
+          <CardDescription>Download all your organisation data as a JSON file.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button size="sm" onClick={exportData} disabled={exporting}>
+            {exporting ? "Exporting..." : "Export all data"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-4 w-4" /> Clear Generated Data
+          </CardTitle>
+          <CardDescription>
+            Delete all conversations, AI-generated content, and intelligence feeds. Your organisation settings, competitors, and product areas will be preserved.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {showClearConfirm ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-destructive">Are you sure? This cannot be undone.</p>
+              <div className="flex gap-2">
+                <Button size="sm" variant="destructive" onClick={clearData} disabled={clearing}>
+                  {clearing ? "Clearing..." : "Yes, delete everything"}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setShowClearConfirm(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button size="sm" variant="outline" onClick={() => setShowClearConfirm(true)}>
+              Clear all generated data
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    </>
   );
 }
 

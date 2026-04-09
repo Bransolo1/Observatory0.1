@@ -202,6 +202,8 @@ frontend/
 
 | Variable | Required | Description |
 |---|---|---|
+| `JWT_SECRET_KEY` | **Production** | JWT signing secret (required for production) |
+| `ENCRYPTION_KEY` | **Production** | API key encryption key (required for production) |
 | `ANTHROPIC_API_KEY` | Optional | Fallback API key (can also set per-org in UI) |
 | `FIRECRAWL_API_KEY` | Optional | Firecrawl for web scraping |
 | `PERPLEXITY_API_KEY` | Optional | Perplexity for web search |
